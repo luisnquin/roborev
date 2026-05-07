@@ -75,16 +75,24 @@ func TestCodex_buildArgs(t *testing.T) {
 }
 
 func TestCodexBuildArgsWithSessionResume(t *testing.T) {
-	a := NewCodexAgent("codex").WithSessionID("session-123").(*CodexAgent)
+	a := NewCodexAgent("codex").
+		WithSessionID("session-123").
+		WithModel("o4-mini").
+		WithReasoning(ReasoningThorough).(*CodexAgent)
 
 	args := a.buildArgs("/repo", false, true, false)
 
-	require.GreaterOrEqual(t, len(args), 3)
-	assert.Equal(t, "exec", args[0])
-	assert.Equal(t, "resume", args[1])
-	assertContainsArg(t, args, "--json")
-	assertContainsArg(t, args, "session-123")
-	assert.Equal(t, "-", args[len(args)-1], "expected stdin marker '-' at end of args, got %v", args)
+	assert.Equal(t, []string{
+		"exec",
+		"--json",
+		"--sandbox", "read-only",
+		"-C", "/repo",
+		"-m", "o4-mini",
+		"-c", `model_reasoning_effort="high"`,
+		"resume",
+		"session-123",
+		"-",
+	}, args)
 }
 
 func TestCodexBuildArgsRejectsInvalidSessionResume(t *testing.T) {
@@ -103,7 +111,8 @@ func TestCodexCommandLineOmitsRuntimeOnlyArgs(t *testing.T) {
 
 	cmdLine := a.CommandLine()
 
-	assert.Contains(t, cmdLine, "exec resume --json")
+	assert.Contains(t, cmdLine, "exec --json")
+	assert.Contains(t, cmdLine, "resume session-123")
 	assert.Contains(t, cmdLine, "session-123")
 	assert.Contains(t, cmdLine, "--sandbox read-only")
 	assert.NotContains(t, cmdLine, " -C ")
@@ -164,7 +173,7 @@ func TestCodexReviewWithSessionResumePassesResumeArgs(t *testing.T) {
 	args := readMockArgs(t, mock.ArgsFile)
 	require.GreaterOrEqual(t, len(args), 4)
 	assert.Equal(t, "exec", args[0])
-	assert.Equal(t, "resume", args[1])
+	assert.Equal(t, "resume", args[len(args)-3])
 	assertContainsArg(t, args, "session-123")
 }
 

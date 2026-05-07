@@ -140,9 +140,6 @@ func (a *CodexAgent) commandArgs(opts codexArgOptions) []string {
 	args := []string{
 		"exec",
 	}
-	if sessionID != "" {
-		args = append(args, "resume")
-	}
 	args = append(args, "--json")
 	if opts.agenticMode {
 		args = append(args, codexDangerousFlag)
@@ -164,6 +161,9 @@ func (a *CodexAgent) commandArgs(opts codexArgOptions) []string {
 	}
 	if effort := a.codexReasoningEffort(); effort != "" {
 		args = append(args, "-c", fmt.Sprintf(`model_reasoning_effort="%s"`, effort))
+	}
+	if sessionID != "" {
+		args = append(args, "resume")
 	}
 	if sessionID != "" {
 		args = append(args, sessionID)
