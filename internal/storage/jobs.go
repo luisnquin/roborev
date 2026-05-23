@@ -11,6 +11,23 @@ import (
 	"unicode"
 )
 
+// retryNotBeforeLayout is a fixed-width timestamp layout used for the
+// retry_not_before column. Two reasons it differs from RFC3339Nano:
+//   - The 9-digit padded fractional seconds avoid the RFC3339Nano quirk
+//     of stripping trailing zeros (".5" vs ".500000000"), which would
+//     break lexicographic SQL comparison around fractional widths.
+//   - Callers must format in UTC (see retryNotBeforeAt). Mixing local
+//     offsets would break comparison during DST fall-back, where the
+//     same local clock time repeats with different UTC offsets.
+const retryNotBeforeLayout = "2006-01-02T15:04:05.000000000Z07:00"
+
+// retryNotBeforeAt returns t formatted for the retry_not_before column.
+// Always normalizes to UTC so DST fall-back can't produce two ordered-
+// differently-but-equal local strings.
+func retryNotBeforeAt(t time.Time) string {
+	return t.UTC().Format(retryNotBeforeLayout)
+}
+
 // parseSQLiteTime parses a time string from SQLite which may be in different formats.
 // Handles RFC3339 (what we write), SQLite datetime('now') format, and timezone variants.
 // Returns zero time for empty strings. Logs a warning for non-empty unrecognized formats
@@ -183,10 +200,17 @@ func (db *DB) EnqueueJob(opts EnqueueOpts) (*ReviewJob, error) {
 	return job, nil
 }
 
-// ClaimJob atomically claims the next queued job for a worker
+// ClaimJob atomically claims the next queued job for a worker.
+// Jobs whose retry_not_before is in the future are skipped so the retry
+// backoff applies regardless of which worker happened to fail the prior
+// attempt.
 func (db *DB) ClaimJob(workerID string) (*ReviewJob, error) {
 	now := time.Now()
 	nowStr := now.Format(time.RFC3339)
+	// retry_not_before is stored UTC + fixed-width nano (see
+	// retryNotBeforeLayout) so the SQL comparison stays monotonic with
+	// time. Format the comparison value the same way.
+	nowNano := retryNotBeforeAt(now)
 
 	// Atomically claim a job by updating it in a single statement
 	// This prevents race conditions where two workers select the same job
@@ -196,10 +220,11 @@ func (db *DB) ClaimJob(workerID string) (*ReviewJob, error) {
 		WHERE id = (
 			SELECT id FROM review_jobs
 			WHERE status = 'queued'
+			  AND (retry_not_before IS NULL OR retry_not_before <= ?)
 			ORDER BY enqueued_at, id
 			LIMIT 1
 		)
-	`, workerID, nowStr, nowStr)
+	`, workerID, nowStr, nowStr, nowNano)
 	if err != nil {
 		return nil, err
 	}
@@ -609,21 +634,30 @@ func (db *DB) ReenqueueJob(jobID int64, opts ReenqueueOpts) error {
 // When workerID is non-empty the update is scoped to the owning worker,
 // preventing a stale/zombie worker from requeuing a reclaimed job.
 // Pass empty workerID to skip the ownership check (for admin/test callers).
-func (db *DB) RetryJob(jobID int64, workerID string, maxRetries int) (bool, error) {
+//
+// retryBackoff, when > 0, defers the requeued job from being claimed until
+// now + retryBackoff. This avoids rapid concurrent agent startups racing on
+// shared agent state (notably opencode's sqlite WAL).
+func (db *DB) RetryJob(jobID int64, workerID string, maxRetries int, retryBackoff time.Duration) (bool, error) {
+	var notBefore any
+	if retryBackoff > 0 {
+		notBefore = retryNotBeforeAt(time.Now().Add(retryBackoff))
+	}
+
 	var result sql.Result
 	var err error
 	if workerID != "" {
 		result, err = db.Exec(`
 			UPDATE review_jobs
-			SET status = 'queued', worker_id = NULL, started_at = NULL, finished_at = NULL, error = NULL, retry_count = retry_count + 1, session_id = NULL
+			SET status = 'queued', worker_id = NULL, started_at = NULL, finished_at = NULL, error = NULL, retry_count = retry_count + 1, session_id = NULL, retry_not_before = ?
 			WHERE id = ? AND retry_count < ? AND status = 'running' AND worker_id = ?
-		`, jobID, maxRetries, workerID)
+		`, notBefore, jobID, maxRetries, workerID)
 	} else {
 		result, err = db.Exec(`
 			UPDATE review_jobs
-			SET status = 'queued', worker_id = NULL, started_at = NULL, finished_at = NULL, error = NULL, retry_count = retry_count + 1, session_id = NULL
+			SET status = 'queued', worker_id = NULL, started_at = NULL, finished_at = NULL, error = NULL, retry_count = retry_count + 1, session_id = NULL, retry_not_before = ?
 			WHERE id = ? AND retry_count < ? AND status = 'running'
-		`, jobID, maxRetries)
+		`, notBefore, jobID, maxRetries)
 	}
 	if err != nil {
 		return false, err
@@ -657,7 +691,8 @@ func (db *DB) FailoverJob(jobID int64, workerID, backupAgent, backupModel string
 		    started_at = NULL,
 		    finished_at = NULL,
 		    error = NULL,
-		    session_id = NULL
+		    session_id = NULL,
+		    retry_not_before = NULL
 		WHERE id = ?
 		  AND status = 'running'
 		  AND worker_id = ?
