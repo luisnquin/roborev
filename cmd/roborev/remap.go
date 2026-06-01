@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	gitrepo "go.kenn.io/kit/git/repo"
 
 	"go.kenn.io/roborev/internal/daemon"
 	"go.kenn.io/roborev/internal/git"
@@ -49,11 +50,12 @@ func remapCmd() *cobra.Command {
 space-separated) and updates review jobs to point at the
 new commits. Called automatically by the post-rewrite hook.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			gitCwd, err := git.GetRepoRoot(".")
+			ctx := cmd.Context()
+			gitCwd, err := gitrepo.Root(ctx, ".")
 			if err != nil {
 				return fmt.Errorf("not a git repository: %w", err)
 			}
-			repoRoot, err := git.GetMainRepoRoot(".")
+			repoRoot, err := gitrepo.MainRoot(ctx, ".")
 			if err != nil {
 				repoRoot = gitCwd
 			}

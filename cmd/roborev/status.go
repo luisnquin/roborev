@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	gitrepo "go.kenn.io/kit/git/repo"
 
-	"go.kenn.io/roborev/internal/git"
 	"go.kenn.io/roborev/internal/githook"
 	"go.kenn.io/roborev/internal/storage"
 )
@@ -176,13 +176,13 @@ func statusCmd() *cobra.Command {
 			}
 
 			// Check for outdated hooks in current repo
-			if root, err := git.GetRepoRoot("."); err == nil {
-				if githook.NeedsUpgrade(root, "post-commit", githook.PostCommitVersionMarker) {
+			if root, err := gitrepo.Root(cmd.Context(), "."); err == nil {
+				if githook.NeedsUpgrade(cmd.Context(), root, "post-commit", githook.PostCommitVersionMarker) {
 					fmt.Println()
 					fmt.Println("Warning: post-commit hook is outdated -- run 'roborev init' to upgrade")
 				}
-				if githook.NeedsUpgrade(root, "post-rewrite", githook.PostRewriteVersionMarker) ||
-					githook.Missing(root, "post-rewrite") {
+				if githook.NeedsUpgrade(cmd.Context(), root, "post-rewrite", githook.PostRewriteVersionMarker) ||
+					githook.Missing(cmd.Context(), root, "post-rewrite") {
 					fmt.Println()
 					fmt.Println("Warning: post-rewrite hook is missing or outdated -- run 'roborev init' to install")
 				}

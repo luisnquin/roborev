@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,11 +12,11 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	godiff "github.com/sourcegraph/go-diff/diff"
+	gitrepo "go.kenn.io/kit/git/repo"
+	gitworktree "go.kenn.io/kit/git/worktree"
 
 	daemonclient "go.kenn.io/roborev/internal/daemon_client"
-	"go.kenn.io/roborev/internal/git"
 	"go.kenn.io/roborev/internal/storage"
-	"go.kenn.io/roborev/internal/worktree"
 )
 
 // tui_actions.go contains action/mutation functions extracted from tui.go.
@@ -50,7 +51,7 @@ func formatClipboardContent(
 			gitRef := review.Job.GitRef
 			// Truncate SHA if it's a full 40-char hex SHA (not a range or branch name)
 			if fullSHAPattern.MatchString(gitRef) {
-				gitRef = git.ShortSHA(gitRef)
+				gitRef = gitrepo.ShortSHA(gitRef)
 			}
 			header = fmt.Sprintf("Review #%d %s %s\n\n", id, review.Job.RepoPath, gitRef)
 		} else {
@@ -270,6 +271,7 @@ func (m model) triggerFix(parentJobID int64, prompt, gitRef string) tea.Cmd {
 // needWorktree if the branch is not checked out anywhere.
 func (m model) applyFixPatch(jobID int64) tea.Cmd {
 	return func() tea.Msg {
+		ctx := m.apiContext()
 		patch, jobDetail, err := m.loadPatchAndJob(jobID)
 		if err != nil {
 			return applyPatchResultMsg{jobID: jobID, err: err}
@@ -277,7 +279,7 @@ func (m model) applyFixPatch(jobID int64) tea.Cmd {
 
 		// Resolve the target directory: if the branch has its own worktree,
 		// apply the patch there instead of the main repo path.
-		targetDir, checkedOut, wtErr := git.WorktreePathForBranch(jobDetail.RepoPath, jobDetail.Branch)
+		targetDir, checkedOut, wtErr := gitrepo.WorktreePathForBranch(ctx, jobDetail.RepoPath, jobDetail.Branch)
 		if wtErr != nil {
 			return applyPatchResultMsg{jobID: jobID, err: wtErr}
 		}
@@ -289,7 +291,7 @@ func (m model) applyFixPatch(jobID int64) tea.Cmd {
 			}
 		}
 
-		return m.checkApplyCommitPatch(jobID, jobDetail, targetDir, patch)
+		return m.checkApplyCommitPatch(ctx, jobID, jobDetail, targetDir, patch)
 	}
 }
 
@@ -297,6 +299,7 @@ func (m model) applyFixPatch(jobID int64) tea.Cmd {
 // patch there, commits, and removes the worktree. The commit persists on the branch.
 func (m model) applyFixPatchInWorktree(jobID int64) tea.Cmd {
 	return func() tea.Msg {
+		ctx := m.apiContext()
 		patch, jobDetail, err := m.loadPatchAndJob(jobID)
 		if err != nil {
 			return applyPatchResultMsg{jobID: jobID, err: err}
@@ -324,7 +327,7 @@ func (m model) applyFixPatchInWorktree(jobID int64) tea.Cmd {
 			}
 		}
 
-		result := m.checkApplyCommitPatch(jobID, jobDetail, wtDir, patch)
+		result := m.checkApplyCommitPatch(ctx, jobID, jobDetail, wtDir, patch)
 
 		// Keep the worktree if patch was applied but commit failed, so the user can recover.
 		if result.commitFailed {
@@ -354,7 +357,7 @@ func (m model) loadPatchAndJob(jobID int64) (string, *storage.ReviewJob, error) 
 
 // checkApplyCommitPatch validates, applies, commits, and marks a patch as applied.
 // Shared by both applyFixPatch (existing worktree) and applyFixPatchInWorktree (temp worktree).
-func (m model) checkApplyCommitPatch(jobID int64, jobDetail *storage.ReviewJob, targetDir, patch string) applyPatchResultMsg {
+func (m model) checkApplyCommitPatch(ctx context.Context, jobID int64, jobDetail *storage.ReviewJob, targetDir, patch string) applyPatchResultMsg {
 	// Check for uncommitted changes in files the patch touches
 	patchedFiles, pfErr := patchFiles(patch)
 	if pfErr != nil {
@@ -375,8 +378,8 @@ func (m model) checkApplyCommitPatch(jobID int64, jobDetail *storage.ReviewJob, 
 	}
 
 	// Dry-run check — only trigger rebase on actual merge conflicts
-	if err := worktree.CheckPatch(targetDir, patch); err != nil {
-		var conflictErr *worktree.PatchConflictError
+	if err := gitworktree.CheckPatch(ctx, targetDir, patch); err != nil {
+		var conflictErr *gitworktree.PatchConflictError
 		if errors.As(err, &conflictErr) {
 			return applyPatchResultMsg{jobID: jobID, rebase: true, err: err}
 		}
@@ -384,7 +387,7 @@ func (m model) checkApplyCommitPatch(jobID int64, jobDetail *storage.ReviewJob, 
 	}
 
 	// Apply the patch
-	if err := worktree.ApplyPatch(targetDir, patch); err != nil {
+	if err := gitworktree.ApplyPatch(ctx, targetDir, patch); err != nil {
 		return applyPatchResultMsg{jobID: jobID, err: err}
 	}
 
@@ -396,7 +399,7 @@ func (m model) checkApplyCommitPatch(jobID int64, jobDetail *storage.ReviewJob, 
 	// Stage and commit
 	commitMsg := fmt.Sprintf("fix: apply roborev fix job #%d", jobID)
 	if parentJobID > 0 {
-		ref := git.ShortSHA(jobDetail.GitRef)
+		ref := gitrepo.ShortSHA(jobDetail.GitRef)
 		commitMsg = fmt.Sprintf("fix: apply roborev fix for %s (job #%d)", ref, jobID)
 	}
 	if err := commitPatch(targetDir, patch, commitMsg); err != nil {

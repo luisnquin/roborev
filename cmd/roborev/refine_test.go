@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -99,7 +100,7 @@ func (m *mockDaemonClient) WaitForReview(jobID int64) (*storage.Review, error) {
 	return m.reviews[job.GitRef], nil
 }
 
-func (m *mockDaemonClient) FindJobForCommit(repoPath, sha string) (*storage.ReviewJob, error) {
+func (m *mockDaemonClient) FindJobForCommit(ctx context.Context, repoPath, sha string) (*storage.ReviewJob, error) {
 	for _, job := range m.jobs {
 		if job.GitRef == sha {
 			return job, nil
@@ -108,7 +109,7 @@ func (m *mockDaemonClient) FindJobForCommit(repoPath, sha string) (*storage.Revi
 	return nil, nil
 }
 
-func (m *mockDaemonClient) FindPendingJobForRef(repoPath, gitRef string) (*storage.ReviewJob, error) {
+func (m *mockDaemonClient) FindPendingJobForRef(ctx context.Context, repoPath, gitRef string) (*storage.ReviewJob, error) {
 	for _, job := range m.jobs {
 		if job.GitRef == gitRef {
 			if job.Status == storage.JobStatusQueued || job.Status == storage.JobStatusRunning {
@@ -505,7 +506,7 @@ func TestFindPendingJobForBranch(t *testing.T) {
 			client := newMockDaemonClient()
 			tt.setup(client)
 
-			pending, err := findPendingJobForBranch(client, "/repo", tt.commits)
+			pending, err := findPendingJobForBranch(t.Context(), client, "/repo", tt.commits)
 			require.NoError(t, err, "findPendingJobForBranch failed: %v")
 
 			if tt.wantJobID == 0 {
@@ -537,7 +538,7 @@ func TestValidateRefineContext_RefusesMainBranchWithoutSince(t *testing.T) {
 
 	chdirForTest(t, repo.Root)
 
-	_, _, _, _, err := validateRefineContext("", "", "")
+	_, _, _, _, err := validateRefineContext(t.Context(), "", "", "")
 	require.Error(t, err, "expected error when validating on main without --since")
 	assert.Contains(t, err.Error(), "refusing to refine on main")
 	assert.Contains(t, err.Error(), "--since")
@@ -555,7 +556,7 @@ func TestValidateRefineContext_AllowsMainBranchWithSince(t *testing.T) {
 
 	chdirForTest(t, repo.Root)
 
-	repoPath, currentBranch, _, mergeBase, err := validateRefineContext("", baseSHA, "")
+	repoPath, currentBranch, _, mergeBase, err := validateRefineContext(t.Context(), "", baseSHA, "")
 	require.NoError(t, err, "validation should pass with --since on main, got: %v")
 
 	assert.NotEmpty(t, repoPath)
@@ -580,7 +581,7 @@ func TestValidateRefineContext_SinceIgnoresUpstreamMissing(t *testing.T) {
 
 	chdirForTest(t, repo.Root)
 
-	repoPath, currentBranch, _, mergeBase, err := validateRefineContext("", baseSHA, "")
+	repoPath, currentBranch, _, mergeBase, err := validateRefineContext(t.Context(), "", baseSHA, "")
 	require.NoError(t, err, "--since should bypass upstream resolution: %v", err)
 
 	assert.NotEmpty(t, repoPath)
@@ -604,7 +605,7 @@ func TestValidateRefineContext_UpstreamMissingErrorsWithoutSince(t *testing.T) {
 
 	chdirForTest(t, repo.Root)
 
-	_, _, _, _, err := validateRefineContext("", "", "")
+	_, _, _, _, err := validateRefineContext(t.Context(), "", "", "")
 	require.Error(t, err, "expected missing-upstream error without --since")
 
 	var missing *git.UpstreamMissingError
@@ -624,7 +625,7 @@ func TestValidateRefineContext_SinceWorksOnFeatureBranch(t *testing.T) {
 
 	chdirForTest(t, repo.Root)
 
-	repoPath, currentBranch, _, mergeBase, err := validateRefineContext("", baseSHA, "")
+	repoPath, currentBranch, _, mergeBase, err := validateRefineContext(t.Context(), "", baseSHA, "")
 	require.NoError(t, err, "--since should work on feature branch, got: %v")
 
 	assert.NotEmpty(t, repoPath)
@@ -641,7 +642,7 @@ func TestValidateRefineContext_InvalidSinceRef(t *testing.T) {
 
 	chdirForTest(t, repo.Root)
 
-	_, _, _, _, err := validateRefineContext("", "nonexistent-ref-abc123", "")
+	_, _, _, _, err := validateRefineContext(t.Context(), "", "nonexistent-ref-abc123", "")
 	require.Error(t, err, "expected error for invalid --since ref")
 	assert.Contains(t, err.Error(), "cannot resolve --since")
 }
@@ -662,7 +663,7 @@ func TestValidateRefineContext_SinceNotAncestorOfHEAD(t *testing.T) {
 
 	chdirForTest(t, repo.Root)
 
-	_, _, _, _, err := validateRefineContext("", otherBranchSHA, "")
+	_, _, _, _, err := validateRefineContext(t.Context(), "", otherBranchSHA, "")
 	require.Error(t, err, "expected error when --since is not an ancestor of HEAD")
 	assert.Contains(t, err.Error(), "not an ancestor of HEAD")
 }
@@ -697,7 +698,7 @@ func TestValidateRefineContext_PrefersNonOriginUpstream(t *testing.T) {
 
 	chdirForTest(t, repo.Root)
 
-	repoPath, currentBranch, base, mergeBase, err := validateRefineContext("", "", "")
+	repoPath, currentBranch, base, mergeBase, err := validateRefineContext(t.Context(), "", "", "")
 	require.NoError(t, err, "validation should pass on feature tracking upstream/main")
 
 	assert.NotEmpty(t, repoPath)
@@ -725,7 +726,7 @@ func TestValidateRefineContext_RefusesLocalMainTrackingNonOriginUpstream(t *test
 
 	chdirForTest(t, repo.Root)
 
-	_, _, _, _, err := validateRefineContext("", "", "")
+	_, _, _, _, err := validateRefineContext(t.Context(), "", "", "")
 	require.Error(t, err, "expected refuse-on-base error for main tracking upstream/main")
 	assert.Contains(t, err.Error(), "refusing to refine on main")
 }
@@ -743,7 +744,7 @@ func TestValidateRefineContext_FeatureBranchWithoutSinceStillWorks(t *testing.T)
 
 	chdirForTest(t, repo.Root)
 
-	repoPath, currentBranch, _, mergeBase, err := validateRefineContext("", "", "")
+	repoPath, currentBranch, _, mergeBase, err := validateRefineContext(t.Context(), "", "", "")
 	require.NoError(t, err, "feature branch without --since should work, got: %v")
 
 	assert.NotEmpty(t, repoPath)
@@ -779,7 +780,7 @@ exit 0
 	}
 
 	testAgent := agent.NewTestAgent()
-	sha, err := commitWithHookRetry(repo.Root, "test commit", testAgent, true)
+	sha, err := commitWithHookRetry(t.Context(), repo.Root, "test commit", testAgent, true)
 	require.NoError(t, err, "commitWithHookRetry should succeed: %v")
 
 	require.NotEmpty(t, sha, "expected non-empty SHA")
@@ -803,7 +804,7 @@ func TestCommitWithHookRetryExhausted(t *testing.T) {
 	}
 
 	testAgent := agent.NewTestAgent()
-	_, err := commitWithHookRetry(repo.Root, "test commit", testAgent, true)
+	_, err := commitWithHookRetry(t.Context(), repo.Root, "test commit", testAgent, true)
 	require.Error(t, err, "expected error after exhausting retries")
 	assert.Contains(t, err.Error(), "after 3 attempts")
 }
@@ -816,7 +817,7 @@ func TestCommitWithHookRetrySkipsNonHookError(t *testing.T) {
 	repo := testutil.InitTestRepo(t)
 
 	testAgent := agent.NewTestAgent()
-	_, err := commitWithHookRetry(repo.Root, "empty commit", testAgent, true)
+	_, err := commitWithHookRetry(t.Context(), repo.Root, "empty commit", testAgent, true)
 	require.Error(t, err, "expected error for empty commit without hook")
 
 	assert.NotContains(t, err.Error(), "pre-commit hook failed")
@@ -843,7 +844,7 @@ func TestCommitWithHookRetrySkipsAddPhaseError(t *testing.T) {
 	defer os.Remove(lockFile)
 
 	testAgent := agent.NewTestAgent()
-	_, err := commitWithHookRetry(repo.Root, "test commit", testAgent, true)
+	_, err := commitWithHookRetry(t.Context(), repo.Root, "test commit", testAgent, true)
 	require.Error(t, err, "expected error with index.lock present")
 
 	assert.NotContains(t, err.Error(), "pre-commit hook failed")
@@ -860,7 +861,7 @@ func TestCommitWithHookRetrySkipsCommitPhaseNonHookError(t *testing.T) {
 	repo.WriteNamedHook("pre-commit", "#!/bin/sh\nexit 0\n")
 
 	testAgent := agent.NewTestAgent()
-	_, err := commitWithHookRetry(repo.Root, "empty commit", testAgent, true)
+	_, err := commitWithHookRetry(t.Context(), repo.Root, "empty commit", testAgent, true)
 	require.Error(t, err, "expected error for empty commit")
 
 	assert.NotContains(t, err.Error(), "pre-commit hook failed")

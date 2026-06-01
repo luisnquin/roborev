@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,9 +13,9 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	gitrepo "go.kenn.io/kit/git/repo"
 
 	"go.kenn.io/roborev/internal/daemon"
-	"go.kenn.io/roborev/internal/git"
 	"go.kenn.io/roborev/internal/storage"
 )
 
@@ -57,7 +58,7 @@ Examples:
   roborev insights --agent gemini --wait    # Use specific agent, wait for result
   roborev insights --json                   # Output job info as JSON`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runInsights(cmd, insightsOptions{
+			return runInsights(cmd.Context(), cmd, insightsOptions{
 				repoPath:   repoPath,
 				branch:     branch,
 				since:      since,
@@ -95,7 +96,7 @@ type insightsOptions struct {
 	jsonOutput bool
 }
 
-func runInsights(cmd *cobra.Command, opts insightsOptions) error {
+func runInsights(ctx context.Context, cmd *cobra.Command, opts insightsOptions) error {
 	repoPath := opts.repoPath
 	if repoPath == "" {
 		workDir, err := os.Getwd()
@@ -111,7 +112,7 @@ func runInsights(cmd *cobra.Command, opts insightsOptions) error {
 		}
 	}
 
-	if _, err := git.GetRepoRoot(repoPath); err != nil {
+	if _, err := gitrepo.Root(ctx, repoPath); err != nil {
 		if opts.repoPath == "" {
 			return fmt.Errorf("not in a git repository (use --repo to specify one)")
 		}

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,7 +11,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"go.kenn.io/roborev/internal/git"
+	gitrepo "go.kenn.io/kit/git/repo"
+
 	"go.kenn.io/roborev/internal/storage"
 )
 
@@ -36,10 +38,10 @@ type Client interface {
 	WaitForReview(jobID int64) (*storage.Review, error)
 
 	// FindJobForCommit finds a job for a specific commit in a repo
-	FindJobForCommit(repoPath, sha string) (*storage.ReviewJob, error)
+	FindJobForCommit(ctx context.Context, repoPath, sha string) (*storage.ReviewJob, error)
 
 	// FindPendingJobForRef finds a queued or running job for any git ref
-	FindPendingJobForRef(repoPath, gitRef string) (*storage.ReviewJob, error)
+	FindPendingJobForRef(ctx context.Context, repoPath, gitRef string) (*storage.ReviewJob, error)
 
 	// GetCommentsForJob fetches comments for a job
 	GetCommentsForJob(jobID int64) ([]storage.Response, error)
@@ -236,11 +238,11 @@ func (c *HTTPClient) WaitForReview(jobID int64) (*storage.Review, error) {
 	}
 }
 
-func (c *HTTPClient) FindJobForCommit(repoPath, sha string) (*storage.ReviewJob, error) {
+func (c *HTTPClient) FindJobForCommit(ctx context.Context, repoPath, sha string) (*storage.ReviewJob, error) {
 	// Normalize repo path to main repo root to handle worktrees consistently.
 	// The daemon stores jobs using the main repo root, so we need to match that.
 	normalizedRepo := repoPath
-	if mainRoot, err := git.GetMainRepoRoot(repoPath); err == nil {
+	if mainRoot, err := gitrepo.MainRoot(ctx, repoPath); err == nil {
 		normalizedRepo = mainRoot
 	}
 	// Also resolve symlinks and make absolute
@@ -316,10 +318,10 @@ func (c *HTTPClient) FindJobForCommit(repoPath, sha string) (*storage.ReviewJob,
 	return nil, nil
 }
 
-func (c *HTTPClient) FindPendingJobForRef(repoPath, gitRef string) (*storage.ReviewJob, error) {
+func (c *HTTPClient) FindPendingJobForRef(ctx context.Context, repoPath, gitRef string) (*storage.ReviewJob, error) {
 	// Normalize repo path to main repo root
 	normalizedRepo := repoPath
-	if mainRoot, err := git.GetMainRepoRoot(repoPath); err == nil {
+	if mainRoot, err := gitrepo.MainRoot(ctx, repoPath); err == nil {
 		normalizedRepo = mainRoot
 	}
 	if resolved, err := filepath.EvalSymlinks(normalizedRepo); err == nil {
@@ -399,7 +401,7 @@ func (c *HTTPClient) GetAllCommentsForJob(jobID, commitID int64, gitRef string) 
 	var legacyURL string
 	if commitID > 0 {
 		legacyURL = fmt.Sprintf("%s/api/comments?commit_id=%d", c.baseURL, commitID)
-	} else if git.LooksLikeSHA(gitRef) {
+	} else if gitrepo.LooksLikeSHA(gitRef) {
 		legacyURL = fmt.Sprintf("%s/api/comments?sha=%s", c.baseURL, gitRef)
 	}
 	if legacyURL != "" {

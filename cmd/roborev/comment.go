@@ -13,8 +13,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-
-	"go.kenn.io/roborev/internal/git"
+	gitrepo "go.kenn.io/kit/git/repo"
 )
 
 func commentCmd() *cobra.Command {
@@ -40,6 +39,7 @@ Examples:
   roborev comment --job 1234567 "msg"  # Force numeric arg as job ID`,
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
 			ref := args[0]
 
 			// Check if ref is a job ID (numeric) or SHA
@@ -56,8 +56,8 @@ Examples:
 			} else {
 				// Auto-detect: try git object first, then job ID
 				// A numeric string could be either - check if it resolves as a git object first
-				if root, err := git.GetRepoRoot("."); err == nil {
-					if resolved, err := git.ResolveSHA(root, ref); err == nil {
+				if root, err := gitrepo.Root(ctx, "."); err == nil {
+					if resolved, err := gitrepo.Resolve(ctx, root, ref); err == nil {
 						sha = resolved
 					}
 				}

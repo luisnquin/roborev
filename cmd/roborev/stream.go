@@ -11,8 +11,7 @@ import (
 	"os/signal"
 
 	"github.com/spf13/cobra"
-
-	"go.kenn.io/roborev/internal/git"
+	gitrepo "go.kenn.io/kit/git/repo"
 )
 
 func streamCmd() *cobra.Command {
@@ -30,6 +29,7 @@ Examples:
   roborev stream --repo .     # Stream events for current repo only
 `,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
 			// Ensure daemon is running
 			if err := ensureDaemon(); err != nil {
 				return fmt.Errorf("daemon not running: %w", err)
@@ -37,7 +37,7 @@ Examples:
 
 			// Resolve repo filter if set - use main repo root for worktree compatibility
 			if repoFilter != "" {
-				root, err := git.GetMainRepoRoot(repoFilter)
+				root, err := gitrepo.MainRoot(ctx, repoFilter)
 				if err != nil {
 					return fmt.Errorf("resolve repo path: %w", err)
 				}

@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	gitrepo "go.kenn.io/kit/git/repo"
 
-	"go.kenn.io/roborev/internal/git"
 	"go.kenn.io/roborev/internal/storage"
 )
 
@@ -46,6 +46,7 @@ Examples:
   roborev list --closed               # Only closed reviews
   roborev list --limit 5              # Show at most 5 jobs`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
 			if err := ensureDaemon(); err != nil {
 				return fmt.Errorf("daemon not running: %w", err)
 			}
@@ -58,24 +59,24 @@ Examples:
 			// (daemon stores jobs under the main repo path).
 			localRepoPath := repoPath
 			if localRepoPath == "" {
-				if root, err := git.GetRepoRoot("."); err == nil {
+				if root, err := gitrepo.Root(ctx, "."); err == nil {
 					localRepoPath = root
 				}
 			}
 			if repoPath == "" {
-				if root, err := git.GetMainRepoRoot("."); err == nil {
+				if root, err := gitrepo.MainRoot(ctx, "."); err == nil {
 					repoPath = root
 				}
 			} else {
 				// Normalize explicit --repo to main repo root so worktree
 				// paths match the daemon's stored repo path.
-				if root, err := git.GetMainRepoRoot(repoPath); err == nil {
+				if root, err := gitrepo.MainRoot(ctx, repoPath); err == nil {
 					repoPath = root
 				}
 			}
 			// Auto-resolve branch from the target repo when not specified.
 			if branch == "" && localRepoPath != "" {
-				branch = git.GetCurrentBranch(localRepoPath)
+				branch = gitrepo.CurrentBranch(ctx, localRepoPath)
 			}
 
 			// Workspace mode: not in a git repo and no --repo specified
