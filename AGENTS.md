@@ -190,6 +190,14 @@ Test conventions:
 - NEVER merge pull requests.
 - NEVER change git branches without explicit user confirmation. Always ask before switching, creating, or checking out branches.
 - Release builds use `CGO_ENABLED=0`.
+- Release workflow testing must not publish anything. Do not run any
+  command, workflow mode, or release tool path that creates public
+  releases, uploads release assets, publishes package repositories,
+  updates taps, signs release artifacts for distribution, pushes tags,
+  or writes to any external release channel. Use local, non-publishing
+  validation that proves artifact names, checksums, and package contents.
+  If a release tool cannot validate without publishing, stop and ask the
+  user instead of approximating with a live publish.
 
 ## Workflow + Commits
 
@@ -197,6 +205,11 @@ Test conventions:
 - Commit after completing each piece of work; do not wait to be asked.
 - When committing, stage ALL modified files related to the work (including formatting-only and ancillary updates).
 - Before committing, run `git diff` and `git status` to verify nothing is unintentionally left unstaged.
+- PR descriptions should not use a standalone "Test Plan" section by
+  default. If verification commands were actually run, list them under
+  "Verification" as evidence. If verification is redundant or already
+  visible in CI, keep the PR body shorter instead of writing a ritual
+  checklist.
 
 ## Review / Refine Guidance
 
