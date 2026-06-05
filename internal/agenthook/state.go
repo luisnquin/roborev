@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
+	"runtime"
 	"strings"
 	"time"
 	"unicode"
@@ -24,6 +24,23 @@ import (
 )
 
 var agentHookGit = gitcmd.New()
+
+type hookScope struct {
+	WorktreeRoot        string
+	TrackedRepoRoot     string
+	Head                string
+	Branch              string
+	WorktreeKey         string
+	CandidateLineageKey string
+	Tracked             bool
+}
+
+type trackedRepoResolution struct {
+	Tracked  bool
+	RootPath string
+	Identity string
+	Name     string
+}
 
 func LoadState() (*StateStore, error) {
 	path := StatePath()
@@ -104,7 +121,7 @@ func (s *StateStore) Record(req Request) (Response, error) {
 }
 
 func (s *StateStore) recordStop(req Request) (Response, error) {
-	repoRoot, head, ok := currentGitHead(req.Event.CWD)
+	scope, ok := resolveHookScope(context.Background(), req.Event.CWD, req.RoborevServerAddr)
 	if !ok {
 		return Response{
 			SessionID:             req.Event.SessionID,
@@ -113,15 +130,23 @@ func (s *StateStore) recordStop(req Request) (Response, error) {
 			Skipped:               true,
 		}, nil
 	}
-	branch := currentGitBranch(repoRoot)
+	if !scope.Tracked {
+		return Response{
+			SessionID:             req.Event.SessionID,
+			Threshold:             req.Threshold,
+			FailedReviewThreshold: req.FailedReviewThreshold,
+			Skipped:               true,
+		}, nil
+	}
 	failedReviewCount, haveFailedReviewCount := countOpenFailedReviews(
-		context.Background(), mainRepoRoot(repoRoot), branch, head, req.RoborevServerAddr,
+		context.Background(), scope.TrackedRepoRoot, scope.Branch, scope.Head, req.RoborevServerAddr,
 	)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	st := s.sessions[req.Event.SessionID]
+	lineageKey := ensureLineageKey(&st, scope)
 	if req.Event.StopHookActive {
 		return Response{
 			SessionID:             req.Event.SessionID,
@@ -140,17 +165,21 @@ func (s *StateStore) recordStop(req Request) (Response, error) {
 	st.LastTurnID = req.Event.TurnID
 	st.LastCWD = req.Event.CWD
 	st.LastSeenAt = now
+	recordSequenceHeads(&st, scope, []string{scope.WorktreeKey})
 
 	actionableReviews := hasActionableFailedReviews(failedReviewCount, haveFailedReviewCount)
 	stopTriggered := thresholdReady(st.StopCountSincePrompt, req.Threshold) && actionableReviews
 	if stopTriggered {
 		st.TriggeredAt = now
 	}
-	failedReviewTriggered := applyFailedReviewTrigger(req, &st, repoRoot, branch, failedReviewCount, haveFailedReviewCount, now)
+	failedReviewTriggered := applyFailedReviewTrigger(
+		req, &st, scope.TrackedRepoRoot, scope.Branch, lineageKey,
+		failedReviewCount, haveFailedReviewCount, now,
+	)
 	promptTriggered := stopTriggered || failedReviewTriggered
 	if promptTriggered {
 		st.ReminderPromptCount++
-		resetPromptCounters(&st, repoHeadKey(repoRoot, branch))
+		resetPromptCountersForKeys(&st, promptResetKeys(scope, lineageKey))
 	}
 	s.sessions[req.Event.SessionID] = st
 	if err := s.saveLocked(); err != nil {
@@ -195,7 +224,7 @@ func (s *StateStore) recordPreToolUse(req Request) (Response, error) {
 		}, nil
 	}
 
-	repoRoot, head, ok := currentGitHead(commandGitDir(req.Event.CWD, req.Event.Command()))
+	scope, ok := resolveHookScope(context.Background(), commandGitDir(req.Event.CWD, req.Event.Command()), req.RoborevServerAddr)
 	if !ok {
 		return Response{
 			SessionID:             req.Event.SessionID,
@@ -204,7 +233,6 @@ func (s *StateStore) recordPreToolUse(req Request) (Response, error) {
 			Skipped:               true,
 		}, nil
 	}
-	branch := currentGitBranch(repoRoot)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -213,7 +241,8 @@ func (s *StateStore) recordPreToolUse(req Request) (Response, error) {
 	if st.RepoHeads == nil {
 		st.RepoHeads = map[string]string{}
 	}
-	st.RepoHeads[repoHeadKey(repoRoot, branch)] = head
+	lineageKey := ensureLineageKey(&st, scope)
+	recordSequenceHeads(&st, scope, commitSequenceKeys(scope, lineageKey))
 	st.LastCWD = req.Event.CWD
 	st.LastSeenAt = time.Now().UTC()
 	s.sessions[req.Event.SessionID] = st
@@ -247,7 +276,7 @@ func (s *StateStore) recordPostToolUse(req Request) (Response, error) {
 		gitDir = commandGitDir(req.Event.CWD, command)
 	}
 
-	repoRoot, head, ok := currentGitHead(gitDir)
+	scope, ok := resolveHookScope(context.Background(), gitDir, req.RoborevServerAddr)
 	if !ok {
 		return Response{
 			SessionID:             req.Event.SessionID,
@@ -257,10 +286,12 @@ func (s *StateStore) recordPostToolUse(req Request) (Response, error) {
 		}, nil
 	}
 
-	branch := currentGitBranch(repoRoot)
-	failedReviewCount, haveFailedReviewCount := countOpenFailedReviews(
-		context.Background(), mainRepoRoot(repoRoot), branch, head, req.RoborevServerAddr,
-	)
+	failedReviewCount, haveFailedReviewCount := 0, false
+	if scope.Tracked {
+		failedReviewCount, haveFailedReviewCount = countOpenFailedReviews(
+			context.Background(), scope.TrackedRepoRoot, scope.Branch, scope.Head, req.RoborevServerAddr,
+		)
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -269,31 +300,74 @@ func (s *StateStore) recordPostToolUse(req Request) (Response, error) {
 	if st.RepoHeads == nil {
 		st.RepoHeads = map[string]string{}
 	}
-	headKey := repoHeadKey(repoRoot, branch)
-	previousHead := st.RepoHeads[headKey]
+	priorLineageKey := ""
+	if st.WorktreeLineageKeys != nil {
+		priorLineageKey = st.WorktreeLineageKeys[scope.WorktreeKey]
+	}
+	lineageKey := ensureLineageKey(&st, scope)
+	preserveDetachedRewriteLineage := false
+	if commitCommand && scope.Branch != "" && detachedLineageKey(priorLineageKey) && lineageKey != priorLineageKey {
+		previousWorktreeHead := st.RepoHeads[scope.WorktreeKey]
+		if previousWorktreeHead != "" &&
+			previousWorktreeHead != scope.Head &&
+			!refReachableFromHead(scope.WorktreeRoot, previousWorktreeHead, scope.Head) &&
+			commitsSincePromptForKey(st, scope.WorktreeKey) > 0 {
+			preserveDetachedRewriteLineage = true
+			lineageKey = priorLineageKey
+			st.WorktreeLineageKeys[scope.WorktreeKey] = priorLineageKey
+		}
+	}
+	sequenceKeys := commitSequenceKeys(scope, lineageKey)
 	// Count commits only against a HEAD baseline recorded earlier in the
 	// session; the first observation merely establishes that baseline below.
 	// Counting on the first observation would misfire when a failed commit
 	// command leaves an unrelated older commit as the latest reflog entry.
-	increment := 0
-	if commitCommand && previousHead != "" && previousHead != head {
-		increment = countNewCommits(repoRoot, previousHead, head)
+	var eventNewCommits []string
+	if commitCommand {
+		for _, key := range sequenceKeys {
+			previousHead := st.RepoHeads[key]
+			if previousHead == "" || previousHead == scope.Head {
+				continue
+			}
+			newCommits, continuous := newCommitSHAs(scope.WorktreeRoot, previousHead, scope.Head)
+			if !continuous {
+				if st.CommitSHAsSincePrompt == nil {
+					st.CommitSHAsSincePrompt = map[string][]string{}
+				}
+				st.CommitSHAsSincePrompt[key] = pendingCommitSHAsAfterRewrite(
+					scope.WorktreeRoot, st.CommitSHAsSincePrompt[key], scope.Head,
+				)
+				delete(st.CommitCountsSincePrompt, key)
+				eventNewCommits = appendUniqueCommitSHAs(eventNewCommits, []string{scope.Head})
+				if key == scope.WorktreeKey {
+					if preserveDetachedRewriteLineage {
+						st.WorktreeLineageKeys[key] = lineageKey
+					} else {
+						st.WorktreeLineageKeys[key] = scope.CandidateLineageKey
+						lineageKey = scope.CandidateLineageKey
+					}
+				}
+				continue
+			}
+			if len(newCommits) == 0 {
+				continue
+			}
+			if st.CommitSHAsSincePrompt == nil {
+				st.CommitSHAsSincePrompt = map[string][]string{}
+			}
+			st.CommitSHAsSincePrompt[key] = appendUniqueCommitSHAs(st.CommitSHAsSincePrompt[key], newCommits)
+			eventNewCommits = appendUniqueCommitSHAs(eventNewCommits, newCommits)
+		}
 	}
 
-	st.RepoHeads[headKey] = head
+	recordSequenceHeads(&st, scope, sequenceKeys)
 	st.LastCWD = req.Event.CWD
 	now := time.Now().UTC()
 	st.LastSeenAt = now
-	if increment > 0 {
-		st.CommitCount += increment
-		// CommitCountsSincePrompt is keyed by repo/branch so a deferred reminder
-		// for one checkout is never advanced, consumed, or reset by another.
-		if st.CommitCountsSincePrompt == nil {
-			st.CommitCountsSincePrompt = map[string]int{}
-		}
-		st.CommitCountsSincePrompt[headKey] += increment
-		st.LastCommitRepo = repoRoot
-		st.LastCommitHead = head
+	if len(eventNewCommits) > 0 {
+		st.CommitCount += len(eventNewCommits)
+		st.LastCommitRepo = scope.WorktreeRoot
+		st.LastCommitHead = scope.Head
 	}
 
 	actionableReviews := hasActionableFailedReviews(failedReviewCount, haveFailedReviewCount)
@@ -301,22 +375,25 @@ func (s *StateStore) recordPostToolUse(req Request) (Response, error) {
 	// actionable failed reviews exist; it does not require a commit in this exact
 	// event, because reviews are produced asynchronously and the failures for the
 	// commit that crossed the threshold usually only land on a later tool call.
-	// The count is keyed by repo/branch, so a deferred reminder for one checkout
-	// is not consumed or reset by activity in another. thresholdReady implies a
-	// real commit was counted for this checkout since its last prompt, and
-	// triggering resets that checkout's count.
-	commitTriggered := thresholdReady(st.CommitCountsSincePrompt[headKey], req.CommitThreshold) && actionableReviews
+	// The count is keyed by both worktree and branch, so a deferred reminder for
+	// one checkout is not consumed or reset by unrelated activity. thresholdReady
+	// implies a real commit was counted for this checkout since its last prompt.
+	commitCountSincePrompt := commitsSincePromptForKeys(st, sequenceKeys)
+	commitTriggered := thresholdReady(commitCountSincePrompt, req.CommitThreshold) && actionableReviews
 	// Capture this checkout's count before resetPromptCounters clears it, so the
 	// reminder text reports the triggering repo's commits, not session-wide totals.
-	triggeringCommitCount := st.CommitCountsSincePrompt[headKey]
+	triggeringCommitCount := commitCountSincePrompt
 	if commitTriggered {
 		st.CommitTriggeredAt = now
 	}
-	failedReviewTriggered := applyFailedReviewTrigger(req, &st, repoRoot, branch, failedReviewCount, haveFailedReviewCount, now)
+	failedReviewTriggered := applyFailedReviewTrigger(
+		req, &st, scope.TrackedRepoRoot, scope.Branch, lineageKey,
+		failedReviewCount, haveFailedReviewCount, now,
+	)
 	promptTriggered := commitTriggered || failedReviewTriggered
 	if promptTriggered {
 		st.ReminderPromptCount++
-		resetPromptCounters(&st, headKey)
+		resetPromptCountersForKeys(&st, promptResetKeys(scope, lineageKey))
 	}
 	s.sessions[req.Event.SessionID] = st
 	if err := s.saveLocked(); err != nil {
@@ -340,7 +417,7 @@ func (s *StateStore) recordPostToolUse(req Request) (Response, error) {
 		resp.Reason = buildFailedReviewReason(req, st)
 	case commitTriggered:
 		resp.TriggeredBy = "commit"
-		resp.Reason = buildCommitReason(req, triggeringCommitCount, repoRoot)
+		resp.Reason = buildCommitReason(req, triggeringCommitCount, scope.WorktreeRoot)
 	}
 	return resp, nil
 }
@@ -354,12 +431,15 @@ func thresholdReady(countSincePrompt, threshold int) bool {
 }
 
 // resetPromptCounters restarts the per-prompt counters after a reminder fires.
-// StopCountSincePrompt is session-wide, but the commit count is cleared only for
-// key (the checkout being prompted) so a prompt in one repo/branch cannot
-// discard a deferred commit reminder owed to another.
-func resetPromptCounters(st *SessionState, key string) {
+// StopCountSincePrompt is session-wide, but commit counts are cleared only for
+// the checkout being prompted so a prompt in one repo or branch cannot discard a
+// deferred commit reminder owed to another.
+func resetPromptCountersForKeys(st *SessionState, keys []string) {
 	st.StopCountSincePrompt = 0
-	delete(st.CommitCountsSincePrompt, key)
+	for _, key := range uniqueStrings(keys) {
+		delete(st.CommitCountsSincePrompt, key)
+		delete(st.CommitSHAsSincePrompt, key)
+	}
 }
 
 func repoHeadKey(repoRoot, branch string) string {
@@ -369,8 +449,136 @@ func repoHeadKey(repoRoot, branch string) string {
 	return repoRoot + "\x00" + branch
 }
 
+func worktreeSequenceKey(repoRoot, worktreeRoot string) string {
+	return repoRoot + "\x00worktree\x00" + filepath.Clean(worktreeRoot)
+}
+
+func commitSequenceKeys(scope hookScope, lineageKey string) []string {
+	if scope.Branch == "" {
+		return []string{scope.WorktreeKey}
+	}
+	branchKey := repoHeadKey(scope.TrackedRepoRoot, scope.Branch)
+	if detachedLineageKey(lineageKey) {
+		return uniqueStrings([]string{scope.WorktreeKey, branchKey})
+	}
+	return []string{branchKey}
+}
+
+func promptResetKeys(scope hookScope, lineageKey string) []string {
+	return commitSequenceKeys(scope, lineageKey)
+}
+
+func recordSequenceHeads(st *SessionState, scope hookScope, keys []string) {
+	if st.RepoHeads == nil {
+		st.RepoHeads = map[string]string{}
+	}
+	for _, key := range keys {
+		st.RepoHeads[key] = scope.Head
+	}
+}
+
+func lineageSequenceKey(repoRoot, branch, worktreeRoot, head string) string {
+	if branch != "" {
+		return repoHeadKey(repoRoot, branch)
+	}
+	worktreeRoot = filepath.Clean(worktreeRoot)
+	return repoRoot + "\x00detached\x00" + worktreeRoot + "\x00" + head
+}
+
+func ensureLineageKey(st *SessionState, scope hookScope) string {
+	if st.WorktreeLineageKeys == nil {
+		st.WorktreeLineageKeys = map[string]string{}
+	}
+	prior := st.WorktreeLineageKeys[scope.WorktreeKey]
+	if prior != "" {
+		if prior == scope.CandidateLineageKey {
+			return prior
+		}
+		previousHead := ""
+		if st.RepoHeads != nil {
+			previousHead = st.RepoHeads[scope.WorktreeKey]
+		}
+		reachable := previousHead != "" && refReachableFromHead(scope.WorktreeRoot, previousHead, scope.Head)
+		if scope.Branch == "" && detachedLineageKey(prior) && reachable {
+			return prior
+		}
+		if scope.Branch != "" && detachedLineageKey(prior) && reachable {
+			return prior
+		}
+	}
+	st.WorktreeLineageKeys[scope.WorktreeKey] = scope.CandidateLineageKey
+	return scope.CandidateLineageKey
+}
+
+func detachedLineageKey(key string) bool {
+	return strings.Contains(key, "\x00lineage\x00") || strings.Contains(key, "\x00detached\x00")
+}
+
+func commitsSincePromptForKey(st SessionState, key string) int {
+	return len(st.CommitSHAsSincePrompt[key]) + st.CommitCountsSincePrompt[key]
+}
+
+func commitsSincePromptForKeys(st SessionState, keys []string) int {
+	seen := map[string]bool{}
+	legacyCount := 0
+	for _, key := range keys {
+		for _, sha := range st.CommitSHAsSincePrompt[key] {
+			if sha != "" {
+				seen[sha] = true
+			}
+		}
+		legacyCount += st.CommitCountsSincePrompt[key]
+	}
+	return len(seen) + legacyCount
+}
+
+func pendingCommitSHAsAfterRewrite(repoRoot string, existing []string, newHead string) []string {
+	kept := make([]string, 0, len(existing)+1)
+	for _, sha := range existing {
+		if refReachableFromHead(repoRoot, sha, newHead) {
+			kept = appendUniqueCommitSHAs(kept, []string{sha})
+		}
+	}
+	return appendUniqueCommitSHAs(kept, []string{newHead})
+}
+
+func appendUniqueCommitSHAs(existing, incoming []string) []string {
+	if len(incoming) == 0 {
+		return existing
+	}
+	seen := make(map[string]bool, len(existing)+len(incoming))
+	for _, sha := range existing {
+		if sha == "" {
+			continue
+		}
+		seen[sha] = true
+	}
+	for _, sha := range incoming {
+		sha = strings.TrimSpace(sha)
+		if sha == "" || seen[sha] {
+			continue
+		}
+		existing = append(existing, sha)
+		seen[sha] = true
+	}
+	return existing
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" || seen[value] {
+			continue
+		}
+		out = append(out, value)
+		seen[value] = true
+	}
+	return out
+}
+
 func applyFailedReviewTrigger(
-	req Request, st *SessionState, repoRoot, branch string, count int, ok bool, now time.Time,
+	req Request, st *SessionState, repoRoot, branch, lineageKey string, count int, ok bool, now time.Time,
 ) bool {
 	if !ok || req.FailedReviewThreshold <= 0 {
 		return false
@@ -381,7 +589,10 @@ func applyFailedReviewTrigger(
 	// failedReviewCount is scoped to the current repo/branch, so dedup the prompt
 	// per repo/branch. A single session-wide counter would let a prompt in one
 	// repo/branch suppress prompts in another with an equal or lower count.
-	key := repoHeadKey(repoRoot, branch)
+	key := lineageKey
+	if key == "" {
+		key = repoHeadKey(repoRoot, branch)
+	}
 	if count < req.FailedReviewThreshold {
 		delete(st.FailedReviewTriggeredCounts, key)
 		return false
@@ -508,6 +719,75 @@ func currentGitBranch(repoRoot string) string {
 	return gitrepo.CurrentBranch(ctx, repoRoot)
 }
 
+func resolveHookScope(ctx context.Context, cwd, configuredAddr string) (hookScope, bool) {
+	worktreeRoot, head, ok := currentGitHead(cwd)
+	if !ok {
+		return hookScope{}, false
+	}
+	trackedRoot := mainRepoRoot(worktreeRoot)
+	tracked := true
+	if resolved, known := resolveTrackedRepo(ctx, worktreeRoot, configuredAddr); known {
+		if !resolved.Tracked {
+			tracked = false
+		} else if strings.TrimSpace(resolved.RootPath) != "" {
+			trackedRoot = strings.TrimSpace(resolved.RootPath)
+		}
+	}
+	branch := currentGitBranch(worktreeRoot)
+	return hookScope{
+		WorktreeRoot:        worktreeRoot,
+		TrackedRepoRoot:     trackedRoot,
+		Head:                head,
+		Branch:              branch,
+		WorktreeKey:         worktreeSequenceKey(trackedRoot, worktreeRoot),
+		CandidateLineageKey: lineageSequenceKey(trackedRoot, branch, worktreeRoot, head),
+		Tracked:             tracked,
+	}, true
+}
+
+func resolveTrackedRepo(ctx context.Context, path, configuredAddr string) (trackedRepoResolution, bool) {
+	ep, ok := roborevEndpoint(configuredAddr)
+	if !ok {
+		return trackedRepoResolution{}, false
+	}
+	client := ep.HTTPClient(2 * time.Second)
+	values := url.Values{}
+	values.Set("path", path)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ep.BaseURL()+"/api/repos/resolve?"+values.Encode(), nil)
+	if err != nil {
+		return trackedRepoResolution{}, false
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return trackedRepoResolution{}, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return trackedRepoResolution{}, false
+	}
+	var out struct {
+		Tracked *bool `json:"tracked"`
+		Repo    *struct {
+			RootPath string `json:"root_path"`
+			Identity string `json:"identity"`
+			Name     string `json:"name"`
+		} `json:"repo,omitempty"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return trackedRepoResolution{}, false
+	}
+	if out.Tracked == nil {
+		return trackedRepoResolution{}, false
+	}
+	resolved := trackedRepoResolution{Tracked: *out.Tracked}
+	if out.Repo != nil {
+		resolved.RootPath = out.Repo.RootPath
+		resolved.Identity = out.Repo.Identity
+		resolved.Name = out.Repo.Name
+	}
+	return resolved, true
+}
+
 // mainRepoRoot resolves the main repository root for daemon API queries,
 // following linked worktrees to the path the daemon stores jobs under. The
 // daemon canonicalizes jobs to the main root on enqueue but the /api/jobs
@@ -527,16 +807,28 @@ func mainRepoRoot(worktreeRoot string) string {
 	return worktreeRoot
 }
 
-func countNewCommits(repoRoot, oldHead, newHead string) int {
-	out, err := gitOutput(repoRoot, "rev-list", "--count", oldHead+".."+newHead)
+func newCommitSHAs(repoRoot, oldHead, newHead string) ([]string, bool) {
+	if oldHead == "" || newHead == "" || oldHead == newHead {
+		return nil, true
+	}
+	if !refReachableFromHead(repoRoot, oldHead, newHead) {
+		return nil, false
+	}
+	out, err := gitOutput(repoRoot, "rev-list", "--reverse", oldHead+".."+newHead)
 	if err != nil {
-		return 1
+		return []string{newHead}, true
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(out))
-	if err != nil || n <= 0 {
-		return 1
+	var shas []string
+	for line := range strings.SplitSeq(out, "\n") {
+		sha := strings.TrimSpace(line)
+		if sha != "" {
+			shas = append(shas, sha)
+		}
 	}
-	return n
+	if len(shas) == 0 {
+		return []string{newHead}, true
+	}
+	return shas, true
 }
 
 func gitOutput(cwd string, args ...string) (string, error) {
@@ -660,6 +952,7 @@ func shellFields(command string) []string {
 	var b strings.Builder
 	var quote rune
 	escaped := false
+	backslashEscapes := runtime.GOOS != "windows"
 	expansionDepth := 0
 	inToken := false
 	pendingExpansion := false
@@ -676,7 +969,7 @@ func shellFields(command string) []string {
 				inToken = true
 				continue
 			}
-			if quote != '\'' && r == '\\' {
+			if quote != '\'' && backslashEscapes && r == '\\' {
 				escaped = true
 				inToken = true
 				continue
@@ -706,7 +999,11 @@ func shellFields(command string) []string {
 		}
 		switch r {
 		case '\\':
-			escaped = true
+			if backslashEscapes {
+				escaped = true
+			} else {
+				b.WriteRune(r)
+			}
 			inToken = true
 		case '$':
 			b.WriteRune(r)
@@ -835,18 +1132,19 @@ func countOpenFailedReviews(ctx context.Context, repoRoot, branch, head, configu
 // for detached HEAD must apply to those too - otherwise a stale or unrelated
 // detached review would prompt $roborev-fix on a branch it does not belong to.
 //
+//   - On detached HEAD, reviews reachable from HEAD are ours, even when they
+//     carry a branch label created after the worktree started detached.
 //   - A job carrying a branch belongs to the queried branch (the daemon already
-//     scoped the query to it).
-//   - On detached HEAD, only branchless reviews reachable from HEAD are ours.
+//     scoped the attached-branch query to it).
 //   - On a branch, a branchless review counts unless it pins a concrete ref that
 //     is unreachable from HEAD; reviews with no ref (repo-level or dirty) still
 //     count, matching the long-standing reminder behavior.
 func failedReviewCountsForHead(repoRoot, branch, head string, job storage.ReviewJob) bool {
-	if strings.TrimSpace(job.Branch) != "" {
-		return branch != ""
-	}
 	if branch == "" {
 		return head != "" && detachedReviewMatches(repoRoot, head, job)
+	}
+	if strings.TrimSpace(job.Branch) != "" {
+		return true
 	}
 	ref := strings.TrimSpace(job.GitRef)
 	if ref == "" || ref == "dirty" || head == "" {
@@ -856,9 +1154,6 @@ func failedReviewCountsForHead(repoRoot, branch, head string, job storage.Review
 }
 
 func detachedReviewMatches(repoRoot, head string, job storage.ReviewJob) bool {
-	if strings.TrimSpace(job.Branch) != "" {
-		return false
-	}
 	ref := strings.TrimSpace(job.GitRef)
 	if ref == "" || ref == "dirty" {
 		return false
