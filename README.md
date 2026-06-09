@@ -133,17 +133,20 @@ This repo uses [`prek`](https://prek.j178.dev/) for local pre-commit checks.
 The hooks are local system hooks. They run a fast Git-test isolation guard and
 `make lint`, so pre-commit can apply `golangci-lint --fix` automatically
 instead of using the upstream `golangci-lint` pre-commit repository. The hooks
-are configured with `always_run = true`, so they run on every commit, not just
-commits that touch Go files.
+for the Git-test isolation guard and `make lint` are configured with
+`always_run = true`, so they run on every commit, not just commits that touch Go
+files. The Renovate config validator runs when `renovate.json` changes.
 
 ```bash
 brew install prek     # or use your preferred prek install method
+mise use --global npm:renovate@latest
 prek install          # install the local git hook
 prek run --all-files  # run the configured checks manually
 ```
 
 If the hook rewrites files, re-stage them and re-run `git commit`. Use
-`make lint-ci` when you want a non-mutating lint check.
+`make lint-ci` when you want a non-mutating lint check. Use
+`make check-renovate-config` to validate `renovate.json` directly.
 
 ## Commands
 
