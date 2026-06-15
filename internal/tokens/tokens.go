@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"go.kenn.io/roborev/internal/procutil"
 )
 
 // Usage holds token consumption data for a single review job.
@@ -181,13 +183,18 @@ func fetchForSessionCLI(
 	}, nil
 }
 
+func buildAgentsviewCmd(ctx context.Context, binPath string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, binPath, args...)
+	procutil.HideConsole(cmd)
+	return cmd
+}
+
 func runAgentsviewCommand(
 	ctx context.Context, timeout time.Duration, binPath string, args ...string,
 ) ([]byte, error) {
 	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-
-	return exec.CommandContext(cmdCtx, binPath, args...).Output()
+	return buildAgentsviewCmd(cmdCtx, binPath, args...).Output()
 }
 
 func shouldFallbackToTokenUse(err error) bool {
