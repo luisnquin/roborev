@@ -203,6 +203,10 @@ type Config struct {
 	RefineMinSeverity string `toml:"refine_min_severity" comment:"Minimum severity for refine: critical, high, medium, or low. Empty disables filtering."`
 	FixMinSeverity    string `toml:"fix_min_severity" comment:"Minimum severity for fix: critical, high, medium, or low. Empty disables filtering."`
 
+	// Fix commit metadata
+	FixCommitAuthor       string   `toml:"fix_commit_author" comment:"Author for roborev-owned fix commits, formatted as Name <email>."`
+	FixCommitCoAuthoredBy []string `toml:"fix_commit_co_authored_by" comment:"Co-authored-by trailers for roborev-owned fix commits, each formatted as Name <email>."`
+
 	AllowUnsafeAgents   *bool `toml:"allow_unsafe_agents"`   // nil = not set, allows commands to choose their own default
 	DisableCodexSandbox bool  `toml:"disable_codex_sandbox"` // use --full-auto instead of --sandbox read-only (for systems where bwrap is broken)
 	ReuseReviewSession  *bool `toml:"reuse_review_session"`  // nil = not set; when true, reuse prior branch review sessions when possible
@@ -308,6 +312,8 @@ type RepoConfig struct {
 	FixMinSeverity                  string   `toml:"fix_min_severity" comment:"Minimum severity for fix in this repo: critical, high, medium, or low."`     // Minimum severity for fix: critical, high, medium, low
 	RefineMinSeverity               string   `toml:"refine_min_severity" comment:"Minimum severity for refine in this repo: critical, high, medium, low."`  // Minimum severity for refine: critical, high, medium, low
 	ReviewMinSeverity               string   `toml:"review_min_severity" comment:"Minimum severity for reviews in this repo: critical, high, medium, low."` // Minimum severity for review: critical, high, medium, low
+	FixCommitAuthor                 string   `toml:"fix_commit_author" comment:"Author for roborev-owned fix commits in this repo, formatted as Name <email>."`
+	FixCommitCoAuthoredBy           []string `toml:"fix_commit_co_authored_by" comment:"Co-authored-by trailers for roborev-owned fix commits in this repo, each formatted as Name <email>."`
 	ExcludePatterns                 []string `toml:"exclude_patterns" comment:"Filenames or glob patterns to exclude from review diffs for this repo."`
 	SnapshotDir                     string   `toml:"snapshot_dir" comment:"Repo-local directory for temporary oversized diff snapshots."`
 	PostCommitReview                string   `toml:"post_commit_review" comment:"Automatic post-commit review mode for this repo: commit or branch."` // "commit" (default) or "branch"
@@ -1234,14 +1240,26 @@ func SaveGlobalTo(path string, cfg *Config) error {
 
 // SaveRepoConfigTo saves a per-repo configuration to a specific path.
 func SaveRepoConfigTo(path string, cfg *RepoConfig) error {
+	return SaveRepoConfigToWithExplicitKeys(path, cfg)
+}
+
+// SaveRepoConfigToWithExplicitKeys saves a per-repo configuration while
+// preserving explicit zero-valued keys named in explicitKeys.
+func SaveRepoConfigToWithExplicitKeys(path string, cfg *RepoConfig, explicitKeys ...string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
 
+	repoPath := filepath.Dir(path)
+	raw, err := LoadRawRepo(repoPath)
+	if err != nil {
+		return err
+	}
 	data, err := tomlv2.Marshal(cfg)
 	if err != nil {
 		return err
 	}
+	data = filterUnintendedZeroRepoConfigKeys(data, cfg, raw, explicitKeys)
 
 	mode := os.FileMode(0o644)
 	if info, err := os.Stat(path); err == nil {
@@ -1266,6 +1284,53 @@ func SaveRepoConfigTo(path string, cfg *RepoConfig) error {
 		return err
 	}
 	return os.Rename(tmpPath, path)
+}
+
+func filterUnintendedZeroRepoConfigKeys(
+	data []byte,
+	cfg *RepoConfig,
+	raw map[string]any,
+	explicitKeys []string,
+) []byte {
+	explicit := make(map[string]bool, len(explicitKeys))
+	for _, key := range explicitKeys {
+		explicit[key] = true
+	}
+	if cfg.FixCommitAuthor == "" &&
+		!rawKeyPresent(raw, fixCommitAuthorKey) &&
+		!explicit[fixCommitAuthorKey] {
+		data = removeTopLevelTOMLAssignment(data, fixCommitAuthorKey)
+	}
+	if len(cfg.FixCommitCoAuthoredBy) == 0 &&
+		!rawKeyPresent(raw, fixCommitCoAuthorsKey) &&
+		!explicit[fixCommitCoAuthorsKey] {
+		data = removeTopLevelTOMLAssignment(data, fixCommitCoAuthorsKey)
+	}
+	if cfg.ReuseReviewSessionLookback == 0 &&
+		!rawKeyPresent(raw, "reuse_review_session_lookback") &&
+		!explicit["reuse_review_session_lookback"] {
+		data = removeTopLevelTOMLAssignment(data, "reuse_review_session_lookback")
+	}
+	return data
+}
+
+func removeTopLevelTOMLAssignment(data []byte, key string) []byte {
+	lines := strings.SplitAfter(string(data), "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), key+" =") {
+			for len(kept) > 0 && strings.HasPrefix(strings.TrimSpace(kept[len(kept)-1]), "#") {
+				kept = kept[:len(kept)-1]
+			}
+			continue
+		}
+		kept = append(kept, line)
+	}
+	var sb strings.Builder
+	for _, line := range kept {
+		sb.WriteString(line)
+	}
+	return []byte(sb.String())
 }
 
 // roborevIDPattern validates .roborev-id content.
