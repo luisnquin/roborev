@@ -22,6 +22,24 @@ your agentic loop while context is fresh.
 2. Every commit triggers a background review -- agents write, roborev reads
 3. View findings in the TUI, feed them to your agent, or let `roborev fix` handle it
 
+### Automation, two layers
+
+![How roborev works](https://roborev.io/assets/static/how-it-works.svg)
+
+- **Post-commit reviews** - a git hook reviews every commit in the background (any agent).
+- **Agent hook** - watches your Claude Code / Codex session and tells the agent to run the roborev-fix skill when findings pile up.
+
+```bash
+roborev init                  # layer 1: per-commit reviews
+roborev skills install
+roborev agent-hook install    # layer 2: mid-session fix loop
+```
+
+Before you ship, run the `/roborev-refine` skill: it re-reviews and fixes your
+whole branch until every review passes, catching bugs before the PR.
+
+New here? Run `roborev quickstart` and point your agent at it.
+
 ## Quick Start
 
 ```bash
@@ -42,7 +60,7 @@ You can also choose the exact binary path with
 ## Features
 
 - **Background Reviews** - Every commit is reviewed automatically via
-  git hooks. No workflow changes required.
+  git hooks. No remote review workflow required.
 - **Auto-Fix** - `roborev fix` feeds review findings to an agent that
   applies fixes and commits. `roborev refine` iterates until reviews pass.
 - **Agent Hook** - Optional Codex and Claude Code harness hooks can prompt
@@ -66,9 +84,9 @@ You can also choose the exact binary path with
 ## The Agentic Fix Loop
 
 When reviews find issues, copy-and-paste the reviews into your
-interactive agent sessions, or invoke the `roborev:fix` skills. You
-can also address open reviews on the command line non-interactively
-with `roborev fix`.
+interactive agent sessions, or invoke `/roborev-fix` in Claude Code
+or `$roborev-fix` in Codex. You can also address open reviews on the
+command line non-interactively with `roborev fix`.
 
 `roborev fix` shows the review findings to an agent, which applies
 changes and commits. The new commit gets reviewed automatically,

@@ -226,7 +226,7 @@ type Config struct {
 	AnthropicAPIKey string `toml:"anthropic_api_key" sensitive:"true"`
 
 	// Hooks configuration
-	Hooks []HookConfig `toml:"hooks"`
+	Hooks []HookConfig `toml:"hooks,omitempty"`
 
 	// Sync configuration for PostgreSQL
 	Sync SyncConfig `toml:"sync"`
@@ -421,7 +421,7 @@ type RepoConfig struct {
 	ShowClassifyJobs        *bool `toml:"show_classify_jobs" comment:"Override whether the TUI queue shows auto-design-review classifier rows for this repo. Omit to inherit."`
 
 	// Hooks configuration (per-repo)
-	Hooks []HookConfig `toml:"hooks"`
+	Hooks []HookConfig `toml:"hooks,omitempty"`
 
 	// Kata task-context integration for review prompts (per-repo)
 	KataContext KataContextConfig `toml:"kata_context"`
@@ -1221,6 +1221,57 @@ func SaveGlobalTo(path string, cfg *Config) error {
 	if err != nil {
 		return err
 	}
+
+	f, err := os.CreateTemp(filepath.Dir(path), ".roborev-config-*.toml")
+	if err != nil {
+		return err
+	}
+	tmpPath := f.Name()
+	defer os.Remove(tmpPath)
+
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
+// defaultHooksExample is appended (commented) only when creating the global
+// config for the first time, so the [[hooks]] feature is discoverable without
+// colliding with the (now omitted) empty hooks array.
+const defaultHooksExample = `
+# To run a command or built-in integration when reviews complete, add hooks.
+# Uncomment and edit. See https://roborev.io for the full reference.
+#
+# [[hooks]]
+# event = "review.failed"
+# command = "notify-send 'roborev: review failed for {repo_name}'"
+#
+# [[hooks]]
+# event = "review.*"
+# type = "kata"
+# project = "myproj"
+`
+
+// WriteDefaultGlobalConfigTo writes cfg to path for first-time creation,
+// appending a commented [[hooks]] example. It writes atomically (temp file +
+// rename) with 0600 permissions. Use SaveGlobalTo for subsequent rewrites.
+func WriteDefaultGlobalConfigTo(path string, cfg *Config) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+
+	data, err := tomlv2.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	data = append(data, []byte(defaultHooksExample)...)
 
 	f, err := os.CreateTemp(filepath.Dir(path), ".roborev-config-*.toml")
 	if err != nil {
