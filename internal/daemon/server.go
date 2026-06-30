@@ -69,12 +69,6 @@ const dailyTelemetryInterval = 24 * time.Hour
 
 // NewServer creates a new daemon server
 func NewServer(db *storage.DB, cfg *config.Config, configPath string) *Server {
-	// Always set for deterministic state - default to false (conservative)
-	agent.SetAllowUnsafeAgents(cfg.AllowUnsafeAgents != nil && *cfg.AllowUnsafeAgents)
-	agent.SetCodexSandboxDisabled(cfg.DisableCodexSandbox)
-	agent.SetAnthropicAPIKey(cfg.AnthropicAPIKey)
-	broadcaster := NewBroadcaster()
-
 	// Initialize error log
 	errorLog, err := NewErrorLog(DefaultErrorLogPath())
 	if err != nil {
@@ -86,6 +80,22 @@ func NewServer(db *storage.DB, cfg *config.Config, configPath string) *Server {
 	if err != nil {
 		log.Printf("Warning: failed to create activity log: %v", err)
 	}
+
+	return newServerWithLogs(db, cfg, configPath, errorLog, activityLog)
+}
+
+func newServerWithLogs(
+	db *storage.DB,
+	cfg *config.Config,
+	configPath string,
+	errorLog *ErrorLog,
+	activityLog *ActivityLog,
+) *Server {
+	// Always set for deterministic state - default to false (conservative)
+	agent.SetAllowUnsafeAgents(cfg.AllowUnsafeAgents != nil && *cfg.AllowUnsafeAgents)
+	agent.SetCodexSandboxDisabled(cfg.DisableCodexSandbox)
+	agent.SetAnthropicAPIKey(cfg.AnthropicAPIKey)
+	broadcaster := NewBroadcaster()
 
 	// Create config watcher for hot-reloading
 	configWatcher := NewConfigWatcher(configPath, cfg, broadcaster, activityLog)
@@ -2035,8 +2045,9 @@ type singleAgentInputs struct {
 func (s *Server) resolveSingleAgent(
 	in singleAgentInputs,
 ) (string, string, *RawJSONOutput) {
-	resolution, err := agent.ResolveWorkflowConfig(
-		in.req.Agent, in.resolutionPath, in.cfg, in.workflow, in.reasoning,
+	repoCfg, _ := config.LoadRepoConfig(in.resolutionPath)
+	resolution, err := agent.ResolveWorkflowConfigFromConfig(
+		in.req.Agent, repoCfg, in.cfg, in.workflow, in.reasoning,
 	)
 	if err != nil {
 		out, _ := rawJSONOutput(
@@ -2046,8 +2057,8 @@ func (s *Server) resolveSingleAgent(
 		return "", "", out
 	}
 	agentName := resolution.PreferredAgent
-	resolved, err := agent.GetPreferredOrBackupWithConfig(
-		in.resolutionPath, agentName, in.cfg, resolution.BackupAgent,
+	resolved, err := agent.GetPreferredOrBackupWithConfigFromConfig(
+		repoCfg, agentName, in.cfg, resolution.BackupAgent,
 	)
 	if err != nil {
 		var unknownErr *agent.UnknownAgentError
