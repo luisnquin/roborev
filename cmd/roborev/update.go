@@ -510,7 +510,7 @@ launchd or systemd).`,
 
 			// Update skills using the NEW binary (current process has old embedded skills)
 			// Use "skills update" to only update agents that already have skills installed
-			if skills.IsInstalled(skills.AgentClaude) || skills.IsInstalled(skills.AgentCodex) {
+			if skills.IsInstalled(skills.AgentClaude) || skills.IsInstalled(skills.AgentCodex) || skills.IsInstalled(skills.AgentDroid) {
 				fmt.Print("Updating skills... ")
 				newBinary := updatedRoborevBinary(binDir)
 				skillsCmd := exec.Command(newBinary, "skills", "update")

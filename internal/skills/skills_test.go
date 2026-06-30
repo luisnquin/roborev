@@ -3,6 +3,7 @@ package skills
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"testing/fstest"
 
@@ -20,6 +21,7 @@ type agentCase struct {
 var agentCases = []agentCase{
 	{agent: AgentClaude, configDir: ".claude", legacyDir: ".claude", displayName: string(AgentClaude)},
 	{agent: AgentCodex, configDir: ".codex", legacyDir: ".codex", displayName: string(AgentCodex)},
+	{agent: AgentDroid, configDir: ".factory", legacyDir: ".factory", displayName: string(AgentDroid)},
 }
 
 func setupTestEnv(t *testing.T) string {
@@ -36,20 +38,20 @@ func setupTestEnv(t *testing.T) string {
 
 func createMockSkill(t *testing.T, homeDir string, agent Agent, skill string) {
 	t.Helper()
-	dir := filepath.Join(homeDir, "."+string(agent), "skills", skill)
+	spec, ok := lookupAgent(agent)
+	require.True(t, ok, "unsupported agent %s", agent)
+	dir := filepath.Join(homeDir, spec.configDirName, "skills", skill)
 	require.NoError(t, os.MkdirAll(dir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("old"), 0o644))
 }
 
-func expectedSkillDirNames(t *testing.T) []string {
+func expectedSkillDirNamesForAgent(t *testing.T, agent Agent) []string {
 	t.Helper()
-	skills, err := ListSkills()
-	require.NoError(t, err)
+	spec, ok := lookupAgent(agent)
+	require.True(t, ok, "unsupported agent %s", agent)
 
-	names := make([]string, 0, len(skills))
-	for _, skill := range skills {
-		names = append(names, skill.DirName)
-	}
+	names, err := embeddedSkillDirNames(spec)
+	require.NoError(t, err)
 	return names
 }
 
@@ -82,7 +84,7 @@ func assertSkillsInstalled(t *testing.T, homeDir string, tc agentCase) {
 	t.Helper()
 
 	skillsDir := filepath.Join(homeDir, tc.configDir, "skills")
-	for _, skill := range expectedSkillDirNames(t) {
+	for _, skill := range expectedSkillDirNamesForAgent(t, tc.agent) {
 		path := filepath.Join(skillsDir, skill, "SKILL.md")
 		_, err := os.Stat(path)
 		require.NoError(t, err, "expected %s to exist", path)
@@ -101,10 +103,9 @@ func TestInstallClaudeSkipsWhenDirMissing(t *testing.T) {
 }
 
 func TestInstallWhenDirExists(t *testing.T) {
-	expectedSkills := expectedSkillDirNames(t)
-
 	for _, tc := range agentCases {
 		t.Run(tc.displayName, func(t *testing.T) {
+			expectedSkills := expectedSkillDirNamesForAgent(t, tc.agent)
 			tmpHome := setupTestEnv(t)
 			agentDir := filepath.Join(tmpHome, tc.configDir)
 			require.NoError(t, os.MkdirAll(agentDir, 0o755))
@@ -129,7 +130,7 @@ func TestInstallIdempotent(t *testing.T) {
 	results1, err := Install()
 	require.NoError(t, err, "First install failed: %v", err)
 
-	expectedSkills := expectedSkillDirNames(t)
+	expectedSkills := expectedSkillDirNamesForAgent(t, AgentClaude)
 
 	claude1 := findResultByAgent(t, results1, AgentClaude)
 	require.Len(t, claude1.Installed, len(expectedSkills), "first install: expected %d installed, got %d", len(expectedSkills), len(claude1.Installed))
@@ -184,22 +185,17 @@ func TestIsInstalled(t *testing.T) {
 		},
 	}
 
-	expectedSkills := expectedSkillDirNames(t)
-	for _, skill := range expectedSkills {
-
-		s := skill
-		tests = append(tests, testCase{
-			name:        "Claude with skill " + s,
-			agent:       AgentClaude,
-			setup:       func(t *testing.T, h string) { createMockSkill(t, h, AgentClaude, s) },
-			shouldExist: true,
-		})
-		tests = append(tests, testCase{
-			name:        "Codex with skill " + s,
-			agent:       AgentCodex,
-			setup:       func(t *testing.T, h string) { createMockSkill(t, h, AgentCodex, s) },
-			shouldExist: true,
-		})
+	for _, tc := range agentCases {
+		for _, skill := range expectedSkillDirNamesForAgent(t, tc.agent) {
+			s := skill
+			agent := tc.agent
+			tests = append(tests, testCase{
+				name:        tc.displayName + " with skill " + s,
+				agent:       agent,
+				setup:       func(t *testing.T, h string) { createMockSkill(t, h, agent, s) },
+				shouldExist: true,
+			})
+		}
 	}
 
 	tests = append(tests, testCase{
@@ -262,10 +258,9 @@ func TestUpdateRemovesLegacySkills(t *testing.T) {
 }
 
 func TestUpdateLegacyOnlyInstall(t *testing.T) {
-	expectedSkills := expectedSkillDirNames(t)
-
 	for _, tc := range agentCases {
 		t.Run(tc.displayName, func(t *testing.T) {
+			expectedSkills := expectedSkillDirNamesForAgent(t, tc.agent)
 			tmpHome := setupTestEnv(t)
 
 			// User only has the deprecated skill — no current skills
@@ -287,7 +282,7 @@ func TestUpdateLegacyOnlyInstall(t *testing.T) {
 }
 
 func TestUpdateOnlyUpdatesInstalled(t *testing.T) {
-	expectedSkillCount := len(expectedSkillDirNames(t))
+	expectedSkillCount := len(expectedSkillDirNamesForAgent(t, AgentClaude))
 
 	tests := []struct {
 		name          string
@@ -431,6 +426,26 @@ func TestListSkillsUsesFirstAgentMetadata(t *testing.T) {
 	}
 }
 
+func TestListSkillsReportsSupportedAgents(t *testing.T) {
+	skills, err := ListSkills()
+	require.NoError(t, err)
+
+	skillsByDir := make(map[string]SkillInfo, len(skills))
+	for _, skill := range skills {
+		skillsByDir[skill.DirName] = skill
+	}
+
+	assert.ElementsMatch(t,
+		[]Agent{AgentClaude, AgentCodex, AgentDroid},
+		skillsByDir["roborev-review"].SupportedAgents)
+	assert.ElementsMatch(t,
+		[]Agent{AgentClaude, AgentCodex, AgentDroid},
+		skillsByDir["roborev-lookahead-review"].SupportedAgents)
+	assert.ElementsMatch(t,
+		[]Agent{AgentClaude, AgentCodex, AgentDroid},
+		skillsByDir["roborev-lookahead-review-branch"].SupportedAgents)
+}
+
 func TestDirNameEnumerationDoesNotReadContent(t *testing.T) {
 	// embeddedSkillDirNames only enumerates directories, so it must
 	// succeed even when SKILL.md files are absent. This guards against
@@ -466,4 +481,139 @@ func TestDirNameEnumerationDoesNotReadContent(t *testing.T) {
 		assert.Contains(t, p, "SKILL.md",
 			"path should end with SKILL.md: %s", p)
 	}
+}
+
+func TestDroidSkillsUseDroidAdaptations(t *testing.T) {
+	// Droid skills are derived from the Codex skills (agent-agnostic, synchronous
+	// --wait, no Claude-specific Task tool) with two Factory-specific
+	// adaptations: slash invocation (/roborev-X, matching Factory's /skill-name
+	// convention) and AGENTS.md (Factory's project-instructions file) instead of
+	// the Codex $roborev-X and CLAUDE.md forms.
+	spec, ok := lookupAgent(AgentDroid)
+	require.True(t, ok)
+	skills, err := embeddedSkillsForAgent(spec)
+	require.NoError(t, err)
+	require.NotEmpty(t, skills)
+	for _, s := range skills {
+		content := string(s.Content)
+		assert.NotContains(t, content, "$roborev", "droid skill %s must use /roborev slash invocation, not $roborev", s.DirName)
+		assert.NotContains(t, content, "CLAUDE.md", "droid skill %s must reference AGENTS.md, not CLAUDE.md", s.DirName)
+		assert.Contains(t, content, "AGENTS.md", "droid skill %s should reference AGENTS.md", s.DirName)
+		assert.Contains(t, content, "/roborev-", "droid skill %s should use /roborev- slash invocation", s.DirName)
+	}
+}
+
+func TestDerivedSkillFilesAreCurrent(t *testing.T) {
+	derived, err := renderDerivedSkills(os.DirFS("."))
+	require.NoError(t, err)
+	require.Len(t, derived, 12)
+
+	for relPath, want := range derived {
+		got, err := os.ReadFile(filepath.FromSlash(relPath))
+		require.NoError(t, err, "read checked-in derived skill %s", relPath)
+		assert.Equal(t, string(want), string(got), "derived skill %s is stale; run `go generate ./internal/skills`", relPath)
+	}
+}
+
+func TestFixSkillsUseHeredocForCommentText(t *testing.T) {
+	for _, agent := range []Agent{AgentClaude, AgentCodex, AgentDroid} {
+		t.Run(string(agent), func(t *testing.T) {
+			spec, ok := lookupAgent(agent)
+			require.True(t, ok)
+			skills, err := embeddedSkillsForAgent(spec)
+			require.NoError(t, err)
+
+			var content string
+			for _, skill := range skills {
+				if skill.DirName == "roborev-fix" {
+					content = strings.ReplaceAll(string(skill.Content), "\r\n", "\n")
+				}
+			}
+			require.NotEmpty(t, content, "missing roborev-fix skill for %s", agent)
+			assert.Contains(t, content, "cat <<'ROBOREV_COMMENT'")
+			assert.Contains(t, content, "never\nby interpolating dynamic text directly into a shell string")
+			assert.NotContains(t, content, `"<summary of changes>"`)
+			assert.NotContains(t, content, "Escape quotes and special characters in the bash command")
+			assert.Equal(t, 0, strings.Count(content, `roborev comment --commenter roborev-fix --job 1019 "`))
+			assert.Equal(t, 0, strings.Count(content, `roborev comment --commenter roborev-fix --job 1021 "`))
+		})
+	}
+}
+
+func TestDroidSkillsInstallToFactoryDir(t *testing.T) {
+	// Droid skills install under ~/.factory/skills (Factory's personal skills
+	// location), not ~/.droid, and are skipped when ~/.factory is absent so the
+	// install stays opt-in for Factory users.
+	t.Run("installs under .factory when present", func(t *testing.T) {
+		tmpHome := setupTestEnv(t)
+		require.NoError(t, os.MkdirAll(filepath.Join(tmpHome, ".factory"), 0o755))
+
+		results, err := Install()
+		require.NoError(t, err)
+		res := findResultByAgent(t, results, AgentDroid)
+		assert.False(t, res.Skipped)
+		for _, name := range expectedSkillDirNamesForAgent(t, AgentDroid) {
+			_, err := os.Stat(filepath.Join(tmpHome, ".factory", "skills", name, "SKILL.md"))
+			require.NoError(t, err, "expected %s skill to install under .factory", name)
+		}
+		_, err = os.Stat(filepath.Join(tmpHome, ".droid"))
+		assert.True(t, os.IsNotExist(err), "no .droid dir should be created")
+	})
+
+	t.Run("skipped when .factory absent", func(t *testing.T) {
+		setupTestEnv(t)
+		results, err := Install()
+		require.NoError(t, err)
+		res := findResultByAgent(t, results, AgentDroid)
+		assert.True(t, res.Skipped, "Droid should be skipped when ~/.factory does not exist")
+	})
+}
+
+func TestDroidSkillOperationsUseHomeEnvWhenUserHomeDirDiffers(t *testing.T) {
+	envHome := t.TempDir()
+	userHome := t.TempDir()
+	t.Setenv("HOME", envHome)
+	stubUserHomeDir(t, userHome)
+	require.NoError(t, os.MkdirAll(filepath.Join(envHome, ".factory"), 0o755))
+
+	results, err := Install()
+	require.NoError(t, err)
+	droidInstall := findResultByAgent(t, results, AgentDroid)
+	require.False(t, droidInstall.Skipped, "Droid should use HOME for Factory config discovery")
+	assertSkillsInstalled(t, envHome, agentCase{
+		agent:       AgentDroid,
+		configDir:   ".factory",
+		displayName: string(AgentDroid),
+	})
+	_, err = os.Stat(filepath.Join(userHome, ".factory"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+
+	assert.True(t, IsInstalled(AgentDroid), "Droid installed detection should use HOME")
+
+	updates, err := Update()
+	require.NoError(t, err)
+	droidUpdate := findResultByAgent(t, updates, AgentDroid)
+	assert.NotEmpty(t, droidUpdate.Updated, "Droid update should use HOME")
+
+	var droidStatus AgentStatus
+	for _, status := range Status() {
+		if status.Agent == AgentDroid {
+			droidStatus = status
+		}
+	}
+	assert.True(t, droidStatus.Available, "Droid status should use HOME")
+	for _, name := range expectedSkillDirNamesForAgent(t, AgentDroid) {
+		assert.Equal(t, SkillCurrent, droidStatus.Skills[name])
+	}
+}
+
+func stubUserHomeDir(t *testing.T, home string) {
+	t.Helper()
+	old := userHomeDir
+	userHomeDir = func() (string, error) {
+		return home, nil
+	}
+	t.Cleanup(func() {
+		userHomeDir = old
+	})
 }

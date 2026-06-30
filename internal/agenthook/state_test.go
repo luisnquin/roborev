@@ -413,6 +413,63 @@ func TestRecordPostToolUseFailedReviewPromptUsesNewBranchLineageKey(t *testing.T
 	assert.Equal("failed_reviews", featureResp.TriggeredBy)
 }
 
+func TestRecordToolUseAcceptsDroidExecuteForCommitTracking(t *testing.T) {
+	assert := assert.New(t)
+	repo := testutil.NewGitRepo(t)
+	initial := repo.CommitFile("main.go", "package main\n", "initial")
+	store := &StateStore{path: filepath.Join(t.TempDir(), "state.json"), sessions: map[string]SessionState{}}
+
+	record := func(eventName, command string) Response {
+		resp, err := store.Record(Request{
+			Event: Input{
+				SessionID:     "session-1",
+				CWD:           repo.Path(),
+				HookEventName: eventName,
+				ToolName:      "Execute",
+				ToolInput:     map[string]json.RawMessage{"command": json.RawMessage(`"` + command + `"`)},
+			},
+			CommitThreshold: 1,
+		})
+		require.NoError(t, err)
+		return resp
+	}
+
+	preResp := record("PreToolUse", "git commit -m second")
+	branchKey := repoHeadKey(repo.Path(), "main")
+	assert.False(preResp.Skipped)
+	assert.Equal(initial, store.sessions["session-1"].RepoHeads[branchKey])
+
+	next := repo.CommitFile("second.go", "package main\n", "second")
+	postResp := record("PostToolUse", "git commit -m second")
+	assert.False(postResp.Skipped)
+	assert.Equal(1, postResp.CommitCount)
+	assert.Equal(next, store.sessions["session-1"].RepoHeads[branchKey])
+	assert.Equal([]string{next}, store.sessions["session-1"].CommitSHAsSincePrompt[branchKey])
+}
+
+func TestRecordToolUseSkipsNonShellToolNames(t *testing.T) {
+	assert := assert.New(t)
+	repo := testutil.NewGitRepo(t)
+	repo.CommitFile("main.go", "package main\n", "initial")
+	store := &StateStore{path: filepath.Join(t.TempDir(), "state.json"), sessions: map[string]SessionState{}}
+
+	for _, eventName := range []string{"PreToolUse", "PostToolUse"} {
+		resp, err := store.Record(Request{
+			Event: Input{
+				SessionID:     "session-1",
+				CWD:           repo.Path(),
+				HookEventName: eventName,
+				ToolName:      "Read",
+				ToolInput:     map[string]json.RawMessage{"command": json.RawMessage(`"git commit -m ignored"`)},
+			},
+			CommitThreshold: 1,
+		})
+		require.NoError(t, err)
+		assert.True(resp.Skipped)
+	}
+	assert.Empty(store.sessions)
+}
+
 func TestRecordStopFailedReviewPromptUsesNewDetachedLineageKey(t *testing.T) {
 	assert := assert.New(t)
 	repo := testutil.NewGitRepo(t)
@@ -964,6 +1021,64 @@ func TestRecordPreToolUseBaselinesUntrackedRepoForLaterPostCommitRegistration(t 
 	require.NoError(t, err)
 
 	assert.True(post.Triggered, "first commit after baseline should count once the repo is registered")
+	assert.Equal("commit", post.TriggeredBy)
+}
+
+func TestRecordPreAndPostToolUseTrackDroidExecuteCommits(t *testing.T) {
+	assert := assert.New(t)
+	repo := testutil.NewGitRepo(t)
+	repo.CommitFile("main.go", "package main\n", "initial")
+
+	closed := false
+	verdict := "F"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/repos/resolve" {
+			assert.NoError(json.NewEncoder(w).Encode(map[string]any{
+				"tracked": true,
+				"repo": map[string]string{
+					"root_path": repo.Path(),
+					"name":      filepath.Base(repo.Path()),
+				},
+			}))
+			return
+		}
+		assert.Equal("/api/jobs", r.URL.Path)
+		assert.NoError(json.NewEncoder(w).Encode(jobsResponse{
+			Jobs: []storage.ReviewJob{
+				{Status: storage.JobStatusDone, Closed: &closed, Verdict: &verdict, Branch: "main"},
+			},
+		}))
+	}))
+	t.Cleanup(server.Close)
+
+	store := &StateStore{
+		path:     filepath.Join(t.TempDir(), "state.json"),
+		sessions: map[string]SessionState{},
+	}
+	req := Request{
+		Event: Input{
+			SessionID:     "session-1",
+			CWD:           repo.Path(),
+			HookEventName: "PreToolUse",
+			ToolName:      "Execute",
+			ToolInput:     map[string]json.RawMessage{"command": json.RawMessage(`"git commit -m feature"`)},
+		},
+		CommitThreshold:   1,
+		Instruction:       "Run roborev fix.",
+		RoborevServerAddr: server.URL,
+	}
+
+	pre, err := store.Record(req)
+	require.NoError(t, err)
+	assert.False(pre.Skipped, "Droid Execute must seed the commit baseline")
+
+	repo.CommitFile("feature.go", "package main\n", "feature")
+	postReq := req
+	postReq.Event.HookEventName = "PostToolUse"
+	post, err := store.Record(postReq)
+	require.NoError(t, err)
+
+	assert.True(post.Triggered, "Droid Execute must count the commit after the baseline")
 	assert.Equal("commit", post.TriggeredBy)
 }
 

@@ -639,12 +639,29 @@ roborev agent-hook daemon start         # start | status | stop | restart
 
 | Flag | Description |
 |------|-------------|
-| `--agent <name>` | Target harness: `codex`, `claude`, or `all` (`all` for `install` only) |
+| `--agent <name>` | Target harness: `codex`, `claude`, `droid`, or `all` (`all` for `install` only) |
 | `--dry-run` | Report whether each target needs changes without writing (`install`) |
 | `--command <cmd>` | Override the installed hook command (default: resolved roborev binary + `agent-hook run`) |
 | `--binary <path>` | Resolve and bake this roborev binary path into installed agent hooks. Mutually exclusive with `--command` |
+| `--scope user` | Factory Droid config scope (`--agent droid` only) |
 
-`roborev agent-hook` is an opt-in Codex and Claude Code integration that prompts the agent to run `$roborev-fix` when review work piles up. See [Agent Hook](/agent-hook/).
+`roborev agent-hook` is an opt-in Codex, Claude Code, and Factory Droid integration that prompts the agent to run the fix skill when review work piles up. See [Agent Hook](/agent-hook/).
+
+```bash
+roborev agent-hook install --agent droid             # Install Factory Droid hook entries (user scope)
+roborev agent-hook install --agent droid --binary ~/.local/bin/roborev
+roborev agent-hook dump --agent droid --scope user   # Print hook config JSON (declarative setups)
+roborev agent-hook run --agent droid                 # Read a hook payload from stdin (Droid calls this)
+roborev agent-hook status                            # Tracked session counters as JSON (shared daemon)
+roborev agent-hook reset <session-id>                # Reset one session (or --all)
+```
+
+Use `--agent droid` to install Factory Droid hook entries that prompt Droid to
+run `/roborev-fix` when review work piles up, sharing the same local state
+daemon. The Droid profile installs to user scope by default
+(`~/.factory/hooks.json`); roborev does not install project-scoped Factory hooks
+because `.factory/hooks.json` is executable repo-local configuration. See
+[Agent Hook](/agent-hook/).
 
 ## Checking Agents
 

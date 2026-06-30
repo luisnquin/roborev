@@ -215,7 +215,7 @@ func (s *StateStore) recordStop(req Request) (Response, error) {
 }
 
 func (s *StateStore) recordPreToolUse(req Request) (Response, error) {
-	if req.Event.ToolName != "" && req.Event.ToolName != "Bash" {
+	if !isShellCommandTool(req.Event.ToolName) {
 		return Response{
 			SessionID:             req.Event.SessionID,
 			CommitThreshold:       req.CommitThreshold,
@@ -266,7 +266,7 @@ func (s *StateStore) recordPreToolUse(req Request) (Response, error) {
 }
 
 func (s *StateStore) recordPostToolUse(req Request) (Response, error) {
-	if req.Event.ToolName != "" && req.Event.ToolName != "Bash" {
+	if !isShellCommandTool(req.Event.ToolName) {
 		return Response{
 			SessionID:             req.Event.SessionID,
 			CommitThreshold:       req.CommitThreshold,
@@ -436,6 +436,10 @@ func hasActionableFailedReviews(count int, ok bool) bool {
 
 func thresholdReady(countSincePrompt, threshold int) bool {
 	return threshold > 0 && countSincePrompt >= threshold
+}
+
+func isShellCommandTool(toolName string) bool {
+	return toolName == "" || toolName == "Bash" || toolName == ExecuteMatcher
 }
 
 // resetPromptCounters restarts the per-prompt counters after a reminder fires.
