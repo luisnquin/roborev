@@ -215,12 +215,21 @@ local reporting or archival workflows:
 roborev export reviews
 roborev export reviews --profile metadata --since 2026-06-01 --until 2026-06-30
 roborev export reviews --closed-only --repo github.com/org/repo --limit 1000
+roborev export reviews --cursor "$NEXT_CURSOR" --until 2026-07-01
 ```
 
 The default `content` profile includes raw review output as stored. That output
 may contain sensitive repository details, so handle exported files carefully.
 Use `--profile metadata` when you only need identifiers, timestamps, verdicts,
 cost metadata, and related review metadata.
+
+Exports include a stable `database_id` for the local review database and, when
+at least one review is emitted, an opaque `next_cursor`. Pass
+`--cursor <next_cursor>` to resume after the previous page; `--cursor` cannot
+be combined with `--since`. If a cursor belongs to a previous database
+generation, `roborev export reviews` exits with code `3`; discard the cursor
+and retry with a window backfill. Other cursor rejections also require
+discarding the cursor before backfilling.
 
 ## Configuration
 
