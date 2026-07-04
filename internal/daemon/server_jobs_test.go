@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"go.kenn.io/roborev/internal/config"
+	daemonclient "go.kenn.io/roborev/internal/daemon_client"
 	gitpkg "go.kenn.io/roborev/internal/git"
 	"go.kenn.io/roborev/internal/storage"
 	"go.kenn.io/roborev/internal/testenv"
@@ -2677,5 +2679,64 @@ func TestHandleEnqueueMinSeverity(t *testing.T) {
 		server.httpServer.Handler.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusBadRequest, w.Code)
 		assert.Contains(t, w.Body.String(), "invalid min_severity")
+	})
+}
+
+func TestListJobsOmitPrompt(t *testing.T) {
+	assert := assert.New(t)
+	server, db, _ := newTestServer(t)
+
+	repo, err := db.GetOrCreateRepo("/test/omit-prompt-repo")
+	require.NoError(t, err)
+	diff := "diff --git a/f b/f"
+	_, err = db.EnqueueJob(storage.EnqueueOpts{
+		RepoID:      repo.ID,
+		GitRef:      "dirty",
+		Agent:       "test",
+		Prompt:      "a very large stored prompt",
+		DiffContent: diff,
+	})
+	require.NoError(t, err)
+
+	ts := httptest.NewServer(server.httpServer.Handler)
+	t.Cleanup(ts.Close)
+	client, err := daemonclient.NewClientWithResponses(ts.URL)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	repoFilter := []string{repo.RootPath}
+	omit := daemonclient.ListJobsParamsOmitPromptTrue
+
+	listJobs := func(t *testing.T, params *daemonclient.ListJobsParams) []daemonclient.ReviewJob {
+		t.Helper()
+		resp, err := client.ListJobsWithResponse(ctx, params)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, resp.StatusCode(), "body: %s", resp.Body)
+		require.NotNil(t, resp.JSON200)
+		require.NotNil(t, resp.JSON200.Jobs)
+		return *resp.JSON200.Jobs
+	}
+
+	t.Run("default includes prompt", func(t *testing.T) {
+		jobs := listJobs(t, &daemonclient.ListJobsParams{Repo: &repoFilter})
+		require.Len(t, jobs, 1)
+		require.NotNil(t, jobs[0].Prompt)
+		assert.Equal("a very large stored prompt", *jobs[0].Prompt)
+	})
+
+	t.Run("omit_prompt=true strips prompt and diff content", func(t *testing.T) {
+		jobs := listJobs(t, &daemonclient.ListJobsParams{Repo: &repoFilter, OmitPrompt: &omit})
+		require.Len(t, jobs, 1)
+		assert.Nil(jobs[0].Prompt)
+		assert.Nil(jobs[0].DiffContent)
+	})
+
+	t.Run("omit_prompt=true strips prompt on single-job lookup", func(t *testing.T) {
+		all := listJobs(t, &daemonclient.ListJobsParams{Repo: &repoFilter})
+		require.Len(t, all, 1)
+		jobs := listJobs(t, &daemonclient.ListJobsParams{Id: &all[0].Id, OmitPrompt: &omit})
+		require.Len(t, jobs, 1)
+		assert.Nil(jobs[0].Prompt)
+		assert.Nil(jobs[0].DiffContent)
 	})
 }
