@@ -22,6 +22,8 @@ roborev skills install
 | `/roborev-review-branch [--base ...] [--type ...]` | Review all commits on the current branch |
 | `/roborev-design-review [commit]` | Request a design review for a commit |
 | `/roborev-design-review-branch [--base ...]` | Design review all commits on the current branch |
+| `/roborev-lookahead-review [commit] [--panel <name>\|none]` | Check a commit for time-series look-ahead bias |
+| `/roborev-lookahead-review-branch [--base <branch>] [--panel <name>\|none]` | Check all branch commits for time-series look-ahead bias |
 | `/roborev-fix [job_id...]` | Discover and fix all open review findings in one pass |
 | `/roborev-refine [--since ...] [--branch ...] [--max-iterations ...]` | Iterative review-fix-review loop until all reviews pass |
 | `/roborev-respond <job_id> [message]` | Add a response to document changes |
@@ -29,7 +31,21 @@ roborev skills install
 ## Usage
 
 !!! note "Codex users"
-    Replace the leading `/` with `$` in all examples below. For example, use `$roborev-review` instead of `/roborev-review`. See the [syntax table](#agent-specific-syntax) for details.
+    All bundled Codex roborev skills are **explicit-only**. An ordinary request
+    such as "Review the changes in this branch" uses Codex's native behavior; it
+    must not activate a roborev skill or run roborev.
+
+    Explicit invocation has three supported forms:
+
+    - For skills installed by `roborev skills install`, replace the leading `/`
+      in the examples below with `$`: `$roborev-review-branch`.
+    - For plugin-managed skills, qualify the same skill with the plugin namespace:
+      `$roborev:roborev-review-branch`.
+    - Select the roborev skill directly in Codex's structured skill picker.
+
+    The namespace distinguishes plugin-contributed skills from personal skills
+    that may have the same name. See the [syntax table](#agent-specific-syntax)
+    for more examples.
 
 ### Review a commit
 
@@ -76,6 +92,33 @@ Review all commits on the current branch with a design-focused lens:
 ```
 
 This is the branch equivalent of `/roborev-design-review`.
+
+### Look-ahead review a commit
+
+Request a time-series review that checks whether a change uses information that
+would not have been available at the point being predicted:
+
+```
+/roborev-lookahead-review
+/roborev-lookahead-review abc123
+/roborev-lookahead-review --panel forecasting
+```
+
+With no commit argument, the skill reviews `HEAD`. Use `--panel none` to disable
+an otherwise configured review panel.
+
+### Look-ahead review a branch
+
+Run the same future-data leakage check across all commits on the current branch:
+
+```
+/roborev-lookahead-review-branch
+/roborev-lookahead-review-branch --base develop
+/roborev-lookahead-review-branch --panel forecasting
+```
+
+The skill compares the branch with its merge base by default, or with the branch
+specified by `--base`, and waits to present the result inline.
 
 ### Fix all open reviews at once
 
@@ -138,8 +181,15 @@ Unlike `roborev refine` on the CLI, the skill performs the full workflow inside 
 
 | Agent | Syntax |
 |-------|--------|
-| Claude Code | `/roborev-review`, `/roborev-review-branch`, `/roborev-design-review`, `/roborev-design-review-branch`, `/roborev-fix`, `/roborev-refine`, `/roborev-respond` |
-| Codex | `$roborev-review`, `$roborev-review-branch`, `$roborev-design-review`, `$roborev-design-review-branch`, `$roborev-fix`, `$roborev-refine`, `$roborev-respond` |
+| Claude Code | `/roborev-review`, `/roborev-review-branch`, `/roborev-design-review`, `/roborev-design-review-branch`, `/roborev-lookahead-review`, `/roborev-lookahead-review-branch`, `/roborev-fix`, `/roborev-refine`, `/roborev-respond` |
+| Factory Droid | `/roborev-review`, `/roborev-review-branch`, `/roborev-design-review`, `/roborev-design-review-branch`, `/roborev-lookahead-review`, `/roborev-lookahead-review-branch`, `/roborev-fix`, `/roborev-refine`, `/roborev-respond` |
+| Codex, personal install | `$roborev-review`, `$roborev-review-branch`, `$roborev-design-review`, `$roborev-design-review-branch`, `$roborev-lookahead-review`, `$roborev-lookahead-review-branch`, `$roborev-fix`, `$roborev-refine`, `$roborev-respond` |
+| Codex, plugin install | `$roborev:roborev-review`, `$roborev:roborev-review-branch`, `$roborev:roborev-design-review`, `$roborev:roborev-design-review-branch`, `$roborev:roborev-lookahead-review`, `$roborev:roborev-lookahead-review-branch`, `$roborev:roborev-fix`, `$roborev:roborev-refine`, `$roborev:roborev-respond` |
+
+Codex can also invoke either installation by selecting the skill in its
+structured skill picker. Skill descriptions intentionally state only the
+explicit invocation requirement; workflow details live in the skill body so
+ordinary prose cannot semantically match a capability summary.
 
 ## Checking Skill Status
 
@@ -188,6 +238,13 @@ Starting in 0.56, the roborev repository also ships agent plugin manifests that 
 - `.codex-plugin/plugin.json` for the Codex plugin system.
 
 These let you install roborev skills through each agent's native plugin channel as an alternative to `roborev skills install`. The skill content is identical; the difference is who manages updates: `roborev skills install` is updated when you run `roborev update`, while plugin-managed installs follow each agent's plugin lifecycle.
+
+Codex namespaces skills supplied by plugins to avoid collisions with personal
+skills. Invoke a plugin-managed skill as `$roborev:roborev-<workflow>` (for
+example, `$roborev:roborev-fix`); invoke a personal skill installed by roborev
+as `$roborev-<workflow>` (for example, `$roborev-fix`). Both forms are explicit
+invocations. General requests such as "fix the issues in this branch" remain
+native Codex tasks and do not select roborev.
 
 ## Waiting for Hook-Triggered Reviews
 
